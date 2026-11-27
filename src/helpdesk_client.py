@@ -51,14 +51,7 @@ class HelpdeskApp:
             except Exception:
                 pass
 
-    def _icon_path(self):
-        """Путь к PNG-иконке (с учётом распаковки PyInstaller --onefile)."""
-        try:
-            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        except Exception:
-            base = os.path.dirname(os.path.abspath(__file__))
-        p = os.path.join(base, "assets", "icon.png")
-        return p if os.path.exists(p) else None
+        self._apply_style()
 
         self.machine_cfg = cfg.load_machine_config()
         self.user_data = cfg.load_user_data()
@@ -89,102 +82,197 @@ class HelpdeskApp:
             self.root.after(2500, self._auto_check_update)
 
     # ------------------------------------------------------------------ UI
-    def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
-        f = ttk.Frame(self.root)
-        f.pack(fill="both", expand=True, **pad)
+    def _icon_path(self):
+        """Путь к PNG-иконке (с учётом распаковки PyInstaller --onefile)."""
+        try:
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        except Exception:
+            base = os.path.dirname(os.path.abspath(__file__))
+        p = os.path.join(base, "assets", "icon.png")
+        return p if os.path.exists(p) else None
 
-        ttk.Label(f, text="Заявка в техподдержку CSL",
-                  font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        ttk.Label(f, text="Опишите проблему — заявка уйдёт администратору автоматически.",
-                  foreground="#555").pack(anchor="w")
+    def _header_icon(self):
+        """Маленькая иконка для шапки (ресайз через PIL, если доступна)."""
+        try:
+            from PIL import Image
+            import io
+            path = self._icon_path()
+            if not path:
+                return None
+            im = Image.open(path).convert("RGBA").resize((36, 36), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return tk.PhotoImage(data=buf.getvalue())
+        except Exception:
+            return None
+
+    def _apply_style(self):
+        """Профессиональная палитра и тема (clam) для tkinter/ttk."""
+        try:
+            style = ttk.Style()
+            if "clam" in style.theme_names():
+                style.theme_use("clam")
+        except Exception:
+            return
+        BG = "#f4f5f7"
+        SURFACE = "#ffffff"
+        ACCENT = "#f5b800"
+        ACCENT_D = "#d99e00"
+        FG = "#1f2733"
+        MUTED = "#6b7280"
+        s = style
+        s.configure(".", font=("Segoe UI", 10), background=BG, foreground=FG)
+        s.configure("TFrame", background=BG)
+        s.configure("Card.TFrame", background=SURFACE)
+        s.configure("TLabel", background=BG, foreground=FG)
+        s.configure("Card.TLabel", background=SURFACE, foreground=FG)
+        s.configure("Card.Sub.TLabel", background=SURFACE, foreground=MUTED)
+        s.configure("Card.Header.TLabel", background=SURFACE, foreground=FG,
+                    font=("Segoe UI", 16, "bold"))
+        s.configure("TLabelframe", background=BG, bordercolor="#d9dde3", relief="solid")
+        s.configure("TLabelframe.Label", background=BG, foreground=MUTED,
+                    font=("Segoe UI", 10, "bold"))
+        s.configure("Card.TLabelframe", background=SURFACE, bordercolor="#e3e6ea")
+        s.configure("Card.TLabelframe.Label", background=SURFACE, foreground=MUTED,
+                    font=("Segoe UI", 10, "bold"))
+        s.configure("TButton", padding=(14, 6), font=("Segoe UI", 10))
+        s.configure("Card.TButton", background=SURFACE)
+        s.configure("Accent.TButton", font=("Segoe UI", 10, "bold"), padding=(18, 8))
+        s.configure("TCheckbutton", background=BG, focuscolor=BG, padding=(4, 2))
+        s.configure("Card.TCheckbutton", background=SURFACE, focuscolor=SURFACE)
+        s.configure("TEntry", fieldbackground=SURFACE, padding=(8, 5))
+        s.configure("TText", fieldbackground=SURFACE, padding=(8, 5))
+        s.configure("Status.TLabel", background="#eaeef3", foreground=MUTED, padding=(10, 6))
+        s.map("Accent.TButton",
+              background=[("active", ACCENT_D), ("!disabled", ACCENT)],
+              foreground=[("!disabled", "#1a1a1a")])
+        s.map("Card.TButton",
+              background=[("active", "#eef0f4"), ("!disabled", SURFACE)],
+              foreground=[("!disabled", FG)])
+
+    def _build_ui(self):
+        main = ttk.Frame(self.root)
+        main.pack(fill="both", expand=True, padx=14, pady=12)
+
+        # --- Шапка с иконкой ---
+        header = ttk.Frame(main, style="Card.TFrame")
+        header.pack(fill="x", pady=(0, 10))
+        ico = self._header_icon()
+        if ico:
+            self._header_img = ico
+            ttk.Label(header, image=ico, style="Card.TLabel").pack(
+                side="left", padx=(14, 12), pady=10)
+        ttk.Label(header, text="CSL Helpdesk", style="Card.Header.TLabel").pack(
+            side="left", anchor="w")
+        ttk.Label(header, text=f"Заявка в техподдержку · версия {APP_VERSION}",
+                  style="Card.Sub.TLabel").pack(side="left", anchor="w", pady=(0, 10))
+
+        def card(title):
+            c = ttk.LabelFrame(main, text=title, style="Card.TLabelframe")
+            c.pack(fill="x", pady=6)
+            return c
 
         # --- Контактные данные ---
-        contact = ttk.LabelFrame(f, text="Контактные данные")
-        contact.pack(fill="x", pady=6)
-        ttk.Label(contact, text="Контактный телефон:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        contact = card("Контактные данные")
+        ttk.Label(contact, text="Телефон *", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(12, 8), pady=(10, 2))
         self.phone_var = tk.StringVar(value=self.user_data.get("phone", ""))
-        self.phone_entry = ttk.Entry(contact, textvariable=self.phone_var, width=30)
-        self.phone_entry.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        self.phone_entry = ttk.Entry(contact, textvariable=self.phone_var, width=28)
+        self.phone_entry.grid(row=0, column=1, columnspan=2, sticky="we",
+                              padx=(0, 12), pady=(10, 2))
         self.phone_entry.bind("<FocusOut>", lambda e: self._save_phone())
-        ttk.Button(contact, text="Сохранить", command=self._save_phone).grid(row=0, column=2, padx=6)
+        ttk.Label(contact, text="обязательный, международный формат",
+                  style="Card.Sub.TLabel").grid(row=1, column=1, sticky="w", padx=(0, 12))
 
-        ttk.Label(contact, text="AnyDesk ID:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        self.anydesk_var = tk.StringVar(value=self.user_data.get("anydesk") or sysinfo.get_anydesk_id())
-        ttk.Entry(contact, textvariable=self.anydesk_var, width=30).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(contact, text="AnyDesk ID", style="Card.TLabel").grid(
+            row=2, column=0, sticky="w", padx=(12, 8), pady=6)
+        self.anydesk_var = tk.StringVar(
+            value=self.user_data.get("anydesk") or sysinfo.get_anydesk_id())
+        ttk.Entry(contact, textvariable=self.anydesk_var, width=28).grid(
+            row=2, column=1, columnspan=2, sticky="we", padx=(0, 12), pady=6)
 
-        ttk.Label(contact, text="RustDesk ID:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        self.rustdesk_var = tk.StringVar(value=self.user_data.get("rustdesk") or sysinfo.get_rustdesk_id())
-        ttk.Entry(contact, textvariable=self.rustdesk_var, width=30).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(contact, text="RustDesk ID", style="Card.TLabel").grid(
+            row=3, column=0, sticky="w", padx=(12, 8), pady=6)
+        self.rustdesk_var = tk.StringVar(
+            value=self.user_data.get("rustdesk") or sysinfo.get_rustdesk_id())
+        ttk.Entry(contact, textvariable=self.rustdesk_var, width=28).grid(
+            row=3, column=1, columnspan=2, sticky="we", padx=(0, 12), pady=6)
+
+        ttk.Button(contact, text="Сохранить", command=self._save_phone).grid(
+            row=4, column=0, columnspan=3, sticky="e", padx=12, pady=(4, 10))
+        contact.columnconfigure(1, weight=1)
+        contact.columnconfigure(2, weight=1)
 
         # --- Неисправности (чекбоксы, разбиты по категориям) ---
-        faults = ttk.LabelFrame(f, text="Что не работает? (отметьте нужное)")
-        faults.pack(fill="x", pady=6)
+        faults = card("Что не работает? (отметьте нужное)")
         self.fault_vars = []  # (категория, label, BooleanVar)
         row = 0
+        col = 0
         for group, items in self.machine_cfg.get("fault_categories", {}).items():
-            ttk.Label(faults, text=group, font=("Segoe UI", 10, "bold"),
-                      foreground="#333").grid(row=row, column=0, columnspan=2,
-                                              sticky="w", padx=8, pady=(6, 2))
+            ttk.Label(faults, text=group, style="Card.TLabel",
+                      font=("Segoe UI", 10, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky="w", padx=(12, 8), pady=(8, 3))
             row += 1
             for label in items:
                 v = tk.BooleanVar()
                 self.fault_vars.append((group, label, v))
-                ttk.Checkbutton(faults, text=label, variable=v).grid(
-                    row=row, column=0, sticky="w", padx=8, pady=2)
+                ttk.Checkbutton(faults, text=label, variable=v,
+                                style="Card.TCheckbutton").grid(
+                    row=row, column=col, sticky="w", padx=(12, 8), pady=2)
                 row += 1
+                col = 1 - col
             row += 1
 
         # --- Комментарий ---
-        cm = ttk.LabelFrame(f, text="Комментарий (текст)")
-        cm.pack(fill="x", pady=6)
-        self.comment = tk.Text(cm, height=4, width=60, wrap="word")
-        self.comment.pack(fill="x", padx=6, pady=4)
+        cm = card("Комментарий")
+        self.comment = tk.Text(cm, height=4, width=56, wrap="word")
+        self.comment.grid(row=0, column=0, sticky="we", padx=10, pady=(8, 10))
         if self.user_data.get("comment"):
             self.comment.insert("1.0", self.user_data.get("comment"))
 
-        # --- Вложения: скриншот и голос ---
-        att = ttk.LabelFrame(f, text="Вложения")
-        att.pack(fill="x", pady=6)
-
+        # --- Вложения ---
+        att = card("Вложения")
         self.shot_btn = ttk.Button(att, text="Сделать скриншот", command=self._take_screenshot)
-        self.shot_btn.grid(row=0, column=0, padx=6, pady=4)
-        self.shot_label = ttk.Label(att, text="скриншот не сделан", foreground="#777")
-        self.shot_label.grid(row=0, column=1, padx=6, pady=4)
+        self.shot_btn.grid(row=0, column=0, sticky="w", padx=(12, 8), pady=(10, 4))
+        self.shot_label = ttk.Label(att, text="скриншот не сделан", style="Card.Sub.TLabel")
+        self.shot_label.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=(10, 4))
         self.shot_clear = ttk.Button(att, text="Убрать", command=self._clear_screenshot)
-        self.shot_clear.grid(row=0, column=2, padx=6, pady=4)
+        self.shot_clear.grid(row=0, column=2, sticky="e", padx=12, pady=(10, 4))
 
         self.voice_btn = ttk.Button(att, text="Записать голос", command=self._toggle_voice)
-        self.voice_btn.grid(row=1, column=0, padx=6, pady=4)
-        self.voice_label = ttk.Label(att, text="голосовое не записано", foreground="#777")
-        self.voice_label.grid(row=1, column=1, padx=6, pady=4)
+        self.voice_btn.grid(row=1, column=0, sticky="w", padx=(12, 8), pady=4)
+        self.voice_label = ttk.Label(att, text="голосовое не записано", style="Card.Sub.TLabel")
+        self.voice_label.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=4)
         self.voice_clear = ttk.Button(att, text="Убрать", command=self._clear_voice)
-        self.voice_clear.grid(row=1, column=2, padx=6, pady=4)
-
+        self.voice_clear.grid(row=1, column=2, sticky="e", padx=12, pady=4)
         if not audio.is_available():
             self.voice_btn.configure(state="disabled")
             self.voice_label.configure(text="микрофон недоступен")
 
-        # --- Кнопки действий ---
-        actions = ttk.Frame(f)
-        actions.pack(pady=8)
-        self.submit_btn = ttk.Button(actions, text="Отправить заявку", command=self._on_submit)
-        self.submit_btn.grid(row=0, column=0, padx=6)
+        # --- Действия ---
+        actions = ttk.Frame(main)
+        actions.pack(fill="x", pady=(8, 6))
+        self.submit_btn = ttk.Button(actions, text="Отправить заявку",
+                                     command=self._on_submit, style="Accent.TButton")
+        self.submit_btn.pack(side="left", padx=(0, 8))
         self.update_btn = ttk.Button(actions, text="Проверить обновления",
                                      command=self._manual_check_update)
         if not self.machine_cfg.get("update_enabled"):
             self.update_btn.configure(state="disabled")
-        self.update_btn.grid(row=0, column=1, padx=6)
-        ttk.Button(actions, text="О программе", command=self._about).grid(row=0, column=2, padx=6)
+        self.update_btn.pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="О программе", command=self._about).pack(side="left")
 
         # --- Статус ---
         self.status = tk.StringVar(value=f"Готово. Версия {APP_VERSION}")
-        ttk.Label(f, textvariable=self.status, foreground="#333").pack(anchor="w")
+        ttk.Label(main, textvariable=self.status, style="Status.TLabel").pack(
+            fill="x", pady=(4, 8))
 
         # --- Сведения о ПК ---
-        self.sys_text = tk.Text(f, height=10, width=80, wrap="word", state="disabled",
-                                bg="#f7f7f7", fg="#222")
-        self.sys_text.pack(fill="x", pady=6)
+        syscard = ttk.LabelFrame(main, text="Сведения о системе (собираются автоматически)",
+                                 style="Card.TLabelframe")
+        syscard.pack(fill="both", expand=True, pady=6)
+        self.sys_text = tk.Text(syscard, height=10, width=56, wrap="word", state="disabled")
+        self.sys_text.pack(fill="both", expand=True, padx=10, pady=(8, 10))
 
     # ---------------------------------------------------------- system info
     def _collect_system_info(self):
@@ -447,7 +535,8 @@ class HelpdeskApp:
 def main():
     root = tk.Tk()
     try:
-        root.geometry("640x780")
+        root.geometry("680x850")
+        root.minsize(620, 760)
     except Exception:
         pass
     HelpdeskApp(root)
