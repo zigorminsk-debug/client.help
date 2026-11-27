@@ -14,7 +14,6 @@ updater.py — самообновление клиента из GitHub Releases.
 именно туда — см. deploy/Install-HelpdeskClient.ps1.
 """
 
-import os
 import subprocess
 import sys
 import tempfile

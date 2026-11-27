@@ -17,23 +17,43 @@ config.py — конфигурация клиента заявок CSL Helpdesk.
 
 import json
 import os
+import re
 from pathlib import Path
 
 VENDOR = "CSL"
 APP_NAME = "HelpdeskClient"
 APP_TITLE = "CSL — Заявка в техподдержку"
 
-# Список неисправностей по умолчанию (используется, если не задан в админ-конфиге)
-DEFAULT_FAULTS = [
-    "Не включается / не загружается",
-    "Не работает интернет / сеть",
-    "Медленно работает",
-    "Не работает принтер / сканер",
-    "Не работает программа / ПО",
-    "Проблема с электронной почтой",
-    "Нужна установка / настройка ПО",
-    "Прочее (описано в комментарии)",
-]
+# Неисправности разбиты на КАТЕТОРИИ (чекбоксы в GUI собираются по этим группам).
+# Если в админ-конфиге задан плоский список — он распределится по категориям
+# по ключевым словам (см. _normalize_fault_categories).
+DEFAULT_FAULT_CATEGORIES = {
+    "Проблемы с ПК и порталами": [
+        "Не включается / не загружается",
+        "Не работает интернет / сеть",
+        "Медленно работает",
+        "Не работает программа / ПО",
+        "Проблема с электронной почтой",
+        "Нужна установка / настройка ПО",
+        "Прочее (описано в комментарии)",
+    ],
+    "Проблемы с принтерами": [
+        "Не работает принтер",
+        "Не работает сканер",
+        "Не подключается принтер по сети",
+        "Нужна заправка / ремонт принтера",
+    ],
+    "Добавление и удаление пользователей": [
+        "Нужно добавить пользователя",
+        "Нужно удалить пользователя",
+        "Нужно изменить права доступа",
+        "Восстановление учётной записи",
+    ],
+}
+
+# Стандартный код страны для телефона (Беларусь). Можно переопределить
+# в админ-конфиге ключом phone_country_code.
+DEFAULT_PHONE_COUNTRY_CODE = "+375"
 
 
 def machine_config_path() -> Path:
@@ -113,11 +133,12 @@ def load_machine_config() -> dict:
                 return raw[n]
         return default
 
-    faults = get("faults", "fault_list", "faults_list")
-    if isinstance(faults, str):
-        faults = [f.strip() for f in faults.split(";") if f.strip()]
-    if not faults:
-        faults = list(DEFAULT_FAULTS)
+    fault_categories = _normalize_fault_categories(
+        get("fault_categories", "fault_cats", "faults")
+    )
+    phone_cc = get("phone_country_code", "phone_cc", default=DEFAULT_PHONE_COUNTRY_CODE)
+    if not isinstance(phone_cc, str):
+        phone_cc = DEFAULT_PHONE_COUNTRY_CODE
 
     verify = get("verify_ssl", "verifyssl", default=True)
     if isinstance(verify, str):
@@ -133,6 +154,9 @@ def load_machine_config() -> dict:
     elif update_enabled is None:
         update_enabled = True
 
+    # Плоский список неисправностей (для backward-compatibility) — из категорий.
+    faults = [label for group in fault_categories.values() for label in group]
+
     return {
         "jira_url": (get("jira_url", "baseurl", "base_url", "url") or "").rstrip("/"),
         "api_user": get("api_user", "username", "login", "user") or "",
@@ -140,11 +164,88 @@ def load_machine_config() -> dict:
         "project_key": get("project_key", "project", "jira_project") or "",
         "issue_type": get("issue_type", "issuetype", default="Запрос") or "Запрос",
         "faults": faults,
+        "fault_categories": fault_categories,
+        "phone_country_code": phone_cc,
         "verify_ssl": bool(verify),
         "github_repo": github_repo or "",
         "github_token": get("github_token", "token") or "",
         "update_enabled": bool(update_enabled),
     }
+
+
+def _normalize_fault_categories(raw) -> dict:
+    """Привожит конфиг неисправностей к словарю {категория: [label, ...]}.
+
+    Поддерживает оба варианта:
+      * словарь {"категория": ["...", ...]};
+      * плоский список — распределяет по категориям по ключевым словам.
+    """
+    if isinstance(raw, dict) and raw:
+        out = {}
+        for group, items in raw.items():
+            if isinstance(items, str):
+                items = [f.strip() for f in items.split(";") if f.strip()]
+            if isinstance(items, list):
+                out[str(group)] = [str(i).strip() for i in items if str(i).strip()]
+        if out:
+            return out
+        return {k: list(v) for k, v in DEFAULT_FAULT_CATEGORIES.items()}
+
+    # Плоский список — распределяем по категориям по ключевым словам.
+    if isinstance(raw, str):
+        raw = [f.strip() for f in raw.split(";") if f.strip()]
+    if isinstance(raw, list) and raw:
+        buckets = {k: [] for k in DEFAULT_FAULT_CATEGORIES}
+        printers_kw = ("принтер", "сканер", "заправ")
+        users_kw = ("пользоват", "учёт", "доступ", "права")
+        for item in raw:
+            item = str(item).strip()
+            low = item.lower()
+            if any(k in low for k in printers_kw):
+                buckets["Проблемы с принтерами"].append(item)
+            elif any(k in low for k in users_kw):
+                buckets["Добавление и удаление пользователей"].append(item)
+            else:
+                buckets["Проблемы с ПК и порталами"].append(item)
+        out = {k: v for k, v in buckets.items() if v}
+        return out or {k: list(v) for k, v in DEFAULT_FAULT_CATEGORIES.items()}
+
+    return {k: list(v) for k, v in DEFAULT_FAULT_CATEGORIES.items()}
+
+
+# --------------------------------------------------------------------------
+# Телефон — международный формат
+# --------------------------------------------------------------------------
+def normalize_phone(raw: str, country_code: str = DEFAULT_PHONE_COUNTRY_CODE) -> str:
+    """Привожит телефон к международному формату: '+CC NNN NNN NNN'.
+
+    - убирает все разделители/знаки (оставляет только цифры);
+    - убирает национальный лидирующий 0 и уже указанный код страны;
+    - если цифр не осталось — возвращает пустую строку.
+    """
+    if not raw:
+        return ""
+    digits = re.sub(r"\D", "", str(raw))
+    if not digits:
+        return ""
+    cc = re.sub(r"\D", "", country_code or "")
+    if cc and digits.startswith(cc):
+        digits = digits[len(cc):]
+    if digits.startswith("0"):
+        digits = digits[1:]
+    if not digits:
+        return ""
+    # Группируем по 3 цифры: '+375 291 234 567'.
+    groups = " ".join(digits[i:i + 3] for i in range(0, len(digits), 3))
+    return f"+{cc} {groups}".strip()
+
+
+def is_valid_phone(normalized: str) -> bool:
+    """Минимальная проверка: непустой и достаточной длины (>=8 цифр)."""
+    if not normalized:
+        return False
+    digits = re.sub(r"\D", "", normalized)
+    return len(digits) >= 8
 
 
 def load_user_data() -> dict:

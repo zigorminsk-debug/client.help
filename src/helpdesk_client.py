@@ -40,10 +40,25 @@ class HelpdeskApp:
         self.root = root
         self.root.title(f"{APP_TITLE} — v{APP_VERSION}")
         self.root.resizable(True, True)
+
+        # Иконка приложения (жёлтый треугольник с восклицательным знаком) —
+        # одинаковая для окна, ярлыков и задачи (EXE/MSI наследуют её из PNG).
+        icon = self._icon_path()
+        if icon:
+            try:
+                self._app_icon = tk.PhotoImage(file=icon)
+                self.root.iconphoto(True, self._app_icon)
+            except Exception:
+                pass
+
+    def _icon_path(self):
+        """Путь к PNG-иконке (с учётом распаковки PyInstaller --onefile)."""
         try:
-            self.root.iconbitmap(default="")
+            base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
         except Exception:
-            pass
+            base = os.path.dirname(os.path.abspath(__file__))
+        p = os.path.join(base, "assets", "icon.png")
+        return p if os.path.exists(p) else None
 
         self.machine_cfg = cfg.load_machine_config()
         self.user_data = cfg.load_user_data()
@@ -102,15 +117,23 @@ class HelpdeskApp:
         self.rustdesk_var = tk.StringVar(value=self.user_data.get("rustdesk") or sysinfo.get_rustdesk_id())
         ttk.Entry(contact, textvariable=self.rustdesk_var, width=30).grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        # --- Неисправности (чекбоксы) ---
+        # --- Неисправности (чекбоксы, разбиты по категориям) ---
         faults = ttk.LabelFrame(f, text="Что не работает? (отметьте нужное)")
         faults.pack(fill="x", pady=6)
-        self.fault_vars = []
-        for i, label in enumerate(self.machine_cfg.get("faults", cfg.DEFAULT_FAULTS)):
-            v = tk.BooleanVar()
-            self.fault_vars.append((label, v))
-            cb = ttk.Checkbutton(faults, text=label, variable=v)
-            cb.grid(row=i // 2, column=i % 2, sticky="w", padx=8, pady=2)
+        self.fault_vars = []  # (категория, label, BooleanVar)
+        row = 0
+        for group, items in self.machine_cfg.get("fault_categories", {}).items():
+            ttk.Label(faults, text=group, font=("Segoe UI", 10, "bold"),
+                      foreground="#333").grid(row=row, column=0, columnspan=2,
+                                              sticky="w", padx=8, pady=(6, 2))
+            row += 1
+            for label in items:
+                v = tk.BooleanVar()
+                self.fault_vars.append((group, label, v))
+                ttk.Checkbutton(faults, text=label, variable=v).grid(
+                    row=row, column=0, sticky="w", padx=8, pady=2)
+                row += 1
+            row += 1
 
         # --- Комментарий ---
         cm = ttk.LabelFrame(f, text="Комментарий (текст)")
@@ -192,9 +215,12 @@ class HelpdeskApp:
         entry.focus_set()
 
         def ok():
-            val = var.get().strip()
-            if not val:
-                messagebox.showwarning("Телефон", "Введите номер телефона.")
+            val = cfg.normalize_phone(var.get(), cfg.DEFAULT_PHONE_COUNTRY_CODE)
+            if not cfg.is_valid_phone(val):
+                messagebox.showwarning(
+                    "Телефон",
+                    "Введите корректный номер телефона в международном формате "
+                    "(например, +375 29 123 45 67).")
                 return
             self.phone_var.set(val)
             self._save_phone()
@@ -205,7 +231,10 @@ class HelpdeskApp:
         self.root.wait_window(win)
 
     def _save_phone(self):
-        self.user_data["phone"] = self.phone_var.get().strip()
+        cc = self.machine_cfg.get("phone_country_code", cfg.DEFAULT_PHONE_COUNTRY_CODE)
+        phone = cfg.normalize_phone(self.phone_var.get(), cc)
+        self.phone_var.set(phone)
+        self.user_data["phone"] = phone
         self.user_data["anydesk"] = self.anydesk_var.get().strip()
         self.user_data["rustdesk"] = self.rustdesk_var.get().strip()
         self.user_data["comment"] = self.comment.get("1.0", "end").strip()
@@ -297,8 +326,8 @@ class HelpdeskApp:
                         "Обновления", f"Установлена последняя версия (v{APP_VERSION})."))
         except Exception as e:
             if manual:
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Обновления", f"Не удалось проверить обновление:\n{e}"))
+                msg = f"Не удалось проверить обновление:\n{e}"
+                self.root.after(0, lambda: messagebox.showerror("Обновления", msg))
         finally:
             if not self._pending_update:
                 self.root.after(0, lambda: self.update_btn.configure(
@@ -331,7 +360,14 @@ class HelpdeskApp:
     # --------------------------------------------------------------- submit
     def _on_submit(self):
         self._save_phone()
-        selected = [label for label, v in self.fault_vars if v.get()]
+        phone = self.phone_var.get().strip()
+        if not cfg.is_valid_phone(phone):
+            messagebox.showwarning(
+                "Телефон",
+                "Укажите корректный контактный телефон в международном формате "
+                "(например, +375 29 123 45 67) — он обязателен для отправки заявки.")
+            return
+        selected = [(group, label) for group, label, v in self.fault_vars if v.get()]
         if not selected:
             messagebox.showwarning("Неисправность", "Отметьте хотя бы одну неисправность.")
             return
@@ -341,13 +377,19 @@ class HelpdeskApp:
             return
 
         desc_lines = []
-        desc_lines.append(f"Контактный телефон: {self.phone_var.get().strip()}")
+        desc_lines.append(f"Контактный телефон: {phone}")
         desc_lines.append(f"AnyDesk ID: {self.anydesk_var.get().strip()}")
         desc_lines.append(f"RustDesk ID: {self.rustdesk_var.get().strip()}")
         desc_lines.append("")
         desc_lines.append("h3. Отмеченные неисправности")
-        for s in selected:
-            desc_lines.append(f"* {s}")
+        by_group = {}
+        for group, label in selected:
+            by_group.setdefault(group, []).append(label)
+        for group, labels in by_group.items():
+            desc_lines.append(f"**{group}:**")
+            for lab in labels:
+                desc_lines.append(f"* {lab}")
+            desc_lines.append("")
         desc_lines.append("")
         comment = self.comment.get("1.0", "end").strip()
         if comment:
@@ -357,7 +399,7 @@ class HelpdeskApp:
         desc_lines.append(sysinfo.format_system_info_markup(self.system_info))
         description = "\n".join(desc_lines)
 
-        summary = f"Заявка: {selected[0]} — {self.system_info.get('hostname', '')}"
+        summary = f"Заявка: {selected[0][1]} — {self.system_info.get('hostname', '')}"
         attachments = [p for p in (self.screenshot_path, self.voice_path) if p]
 
         self.submit_btn.configure(state="disabled")
@@ -380,9 +422,11 @@ class HelpdeskApp:
             url = f"{self.machine_cfg['jira_url']}/browse/{key}"
             self.root.after(0, lambda: self._on_success(key, url, result))
         except jira.JiraError as e:
-            self.root.after(0, lambda: self._on_error(str(e)))
+            msg = str(e)
+            self.root.after(0, lambda: self._on_error(msg))
         except Exception as e:
-            self.root.after(0, lambda: self._on_error(f"Неожиданная ошибка: {e}"))
+            msg = f"Неожиданная ошибка: {e}"
+            self.root.after(0, lambda: self._on_error(msg))
 
     def _on_success(self, key, url, result):
         self.submit_btn.configure(state="normal")

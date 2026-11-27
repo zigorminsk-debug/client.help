@@ -11,6 +11,7 @@ AnyDesk/RustDesk) использует WMI / реестр / файлы и кор
 import datetime
 import os
 import platform
+import re
 import socket
 import subprocess
 
@@ -220,50 +221,104 @@ def _network_info() -> list:
 
 
 # --------------------------------------------------------------------------
-# AnyDesk / RustDesk — попытка автоопределения ID (с ручным вводом в GUI)
+# AnyDesk / RustDesk — автоопределение ID (с ручным вводом в GUI)
+# Автоопределение эвристическое: работает, если инструмент установлен и
+# отдаёт свой ID через один из доступных источников. Если ни один не
+# сработал — поле остаётся пустым и пользователь вводит ID вручную.
 # --------------------------------------------------------------------------
+def _looks_like_id(s: str) -> bool:
+    s = str(s).strip()
+    return bool(s) and s.isdigit() and 6 <= len(s) <= 12
+
+
+def _scan_text_for_id(text: str) -> str:
+    """Ищет в тексте самостоятельное число длиной 6–12 цифр (ID AnyDesk/RustDesk)."""
+    for line in text.splitlines():
+        for token in line.replace(",", " ").replace(":", " ").split():
+            token = token.strip().strip('"').strip("'")
+            if _looks_like_id(token):
+                return token
+    return ""
+
+
 def get_anydesk_id() -> str:
-    """AnyDesk умеет отдавать свой ID через CLI: anydesk.exe --get-id"""
+    """Попытка определения AnyDesk ID: CLI → реестр → файлы конфига."""
+    # 1) CLI (не все версии поддерживают --get-id, поэтому  guard)
     for exe in ("anydesk.exe", "anydesk"):
         try:
             out = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
                                  timeout=5, creationflags=0x08000000 if os.name == "nt" else 0)
-            if out.returncode == 0 and out.stdout.strip():
+            if out.returncode == 0 and out.stdout.strip() and _looks_like_id(out.stdout.strip()):
                 return out.stdout.strip()
         except Exception:
             continue
-    # Запасной вариант — реестр
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\AnyDesk") as key:
-            for i in range(64):
-                try:
-                    name, value, _ = winreg.EnumValue(key, i)
-                    if name.lower() == "adanywhereid" or (isinstance(value, str) and value.isdigit()):
-                        return value
-                except OSError:
-                    break
-    except Exception:
-        pass
+
+    # 2) Реестр: перебираем HKLM и HKCU, все значения; ищем ad-anywhere-id или любое число.
+    for root in (r"SOFTWARE\AnyDesk", r"SOFTWARE\Wow6432Node\AnyDesk"):
+        for hive in ("HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER"):
+            try:
+                import winreg
+                hk = getattr(winreg, hive)
+                with winreg.OpenKey(hk, root) as key:
+                    for i in range(128):
+                        try:
+                            name, value, _ = winreg.EnumValue(key, i)
+                        except OSError:
+                            break
+                        if name.lower() == "adanywhereid" and _looks_like_id(value):
+                            return str(value).strip()
+                        if isinstance(value, (int, str)) and _looks_like_id(value):
+                            return str(value).strip()
+            except Exception:
+                continue
+
+    # 3) Файлы конфига AnyDesk (per-user) — ищем самостоятельное число.
+    for base in (os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", "")):
+        if not base:
+            continue
+        for rel in ("AnyDesk/AnyDesk.ini", "AnyDesk/config.json", "AnyDesk/AnyDesk.conf"):
+            path = os.path.join(base, rel)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    found = _scan_text_for_id(fh.read())
+                if found:
+                    return found
+            except Exception:
+                continue
     return ""
 
 
 def get_rustdesk_id() -> str:
-    """RustDesk хранит ID в конфиге TOML."""
+    """Попытка определения RustDesk ID из TOML-конфига (более устойчивый парсер)."""
     candidates = [
         os.path.join(os.environ.get("ProgramData", ""), "RustDesk", "config", "RustDesk.toml"),
         os.path.expanduser("~/.config/rustdesk/RustDesk.toml"),
         os.path.expanduser("~/AppData/Roaming/RustDesk/config/RustDesk.toml"),
+        os.path.expanduser("~/AppData/Local/RustDesk/config/RustDesk.toml"),
+        os.path.expanduser("~/RustDesk.toml"),
     ]
+    id_re = re.compile(r'(?im)^\s*id\s*=\s*["\']?(\d{6,12})["\']?')
     for path in candidates:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("id") and "=" in line:
-                        val = line.split("=", 1)[1].strip().strip('"')
-                        if val:
-                            return val
+                text = f.read()
+            m = id_re.search(text)
+            if m:
+                return m.group(1)
+            # Запас: любое самостоятельное число в конфиге.
+            found = _scan_text_for_id(text)
+            if found:
+                return found
+        except Exception:
+            continue
+
+    # Запас: CLI rustdesk --get-id (если поддерживается).
+    for exe in ("rustdesk.exe", "rustdesk"):
+        try:
+            out = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
+                                 timeout=5, creationflags=0x08000000 if os.name == "nt" else 0)
+            if out.returncode == 0 and out.stdout.strip() and _looks_like_id(out.stdout.strip()):
+                return out.stdout.strip()
         except Exception:
             continue
     return ""
