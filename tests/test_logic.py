@@ -140,6 +140,109 @@ def test_jira_authentication_error(mock_server):
         bad.test_connection()
 
 
+# ------------------------------------------------------- remote IDs (AnyDesk/RustDesk)
+def test_validate_remote_id():
+    assert sysinfo.validate_remote_id("123456789") == "123456789"
+    assert sysinfo.validate_remote_id("'123456789'") == "123456789"
+    assert sysinfo.validate_remote_id('"123456789"') == "123456789"
+    assert sysinfo.validate_remote_id("  123456789\n") == "123456789"
+    assert sysinfo.validate_remote_id("") == ""
+    assert sysinfo.validate_remote_id(None) == ""
+    assert sysinfo.validate_remote_id("abc") == ""
+    assert sysinfo.validate_remote_id("123") == ""  # слишком короткий
+
+
+def test_parse_anydesk_conf():
+    assert sysinfo.parse_anydesk_conf("ad_anywhere_id = 123456789\n") == "123456789"
+    assert sysinfo.parse_anydesk_conf("ad_anywhere_id=987654321\n") == "987654321"
+    assert sysinfo.parse_anydesk_conf("other = 1\n") == ""
+    assert sysinfo.parse_anydesk_conf("") == ""
+
+
+def test_parse_rustdesk_toml_single_quotes():
+    # RustDesk пишет id в одинарных кавычках — старый парсер их не снимал.
+    assert sysinfo.parse_rustdesk_toml("id = '123456789'\n") == "123456789"
+    assert sysinfo.parse_rustdesk_toml('id = "123456789"\n') == "123456789"
+    assert sysinfo.parse_rustdesk_toml("id = 123456789\n") == "123456789"
+    assert sysinfo.parse_rustdesk_toml("id='123456789'\n") == "123456789"
+    assert sysinfo.parse_rustdesk_toml("id = ''\n") == ""
+    assert sysinfo.parse_rustdesk_toml("password = 'x'\n") == ""
+
+
+def test_extract_cli_id():
+    assert sysinfo.extract_cli_id("123456789\n") == "123456789"
+    assert sysinfo.extract_cli_id("  123456789  \n") == "123456789"
+    assert sysinfo.extract_cli_id("") == ""
+    assert sysinfo.extract_cli_id("error") == ""
+
+
+def test_rustdesk_id_from_toml_file(tmp_path, monkeypatch):
+    toml = tmp_path / "RustDesk.toml"
+    toml.write_text("id = '555123456'\n[options]\n", encoding="utf-8")
+    monkeypatch.setattr(sysinfo, "_candidate_rustdesk_exes", lambda: [])
+    monkeypatch.setattr(sysinfo, "_candidate_rustdesk_confs", lambda exes=None: [str(toml)])
+    assert sysinfo.get_rustdesk_id() == "555123456"
+    vid, src = sysinfo.get_rustdesk_id_with_source()
+    assert vid == "555123456" and "RustDesk.toml" in src
+
+
+def test_anydesk_id_from_conf_file(tmp_path, monkeypatch):
+    conf = tmp_path / "anydesk.conf"
+    conf.write_text("ad_anywhere_id = 777888999\n", encoding="utf-8")
+    monkeypatch.setattr(sysinfo, "_candidate_anydesk_exes", lambda: [])
+    monkeypatch.setattr(sysinfo, "_candidate_anydesk_confs", lambda exes=None: [str(conf)])
+    assert sysinfo.get_anydesk_id() == "777888999"
+
+
+def test_detect_remote_ids_shape(monkeypatch):
+    monkeypatch.setattr(sysinfo, "_candidate_anydesk_exes", lambda: [])
+    monkeypatch.setattr(sysinfo, "_candidate_anydesk_confs", lambda exes=None: [])
+    monkeypatch.setattr(sysinfo, "_candidate_rustdesk_exes", lambda: [])
+    monkeypatch.setattr(sysinfo, "_candidate_rustdesk_confs", lambda exes=None: [])
+    res = sysinfo.detect_remote_ids()
+    assert set(res) == {"anydesk", "rustdesk"}
+    assert res["anydesk"]["id"] == "" and res["rustdesk"]["id"] == ""
+
+
+# --------------------------------------------------------------- fault groups
+def test_fault_groups_default():
+    flat, groups = cfg._normalize_fault_groups(None, None)
+    assert flat and groups
+    assert flat == [i for g in groups for i in g["items"]]
+    assert any(g["group"] for g in groups)  # есть заголовки групп
+
+
+def test_fault_groups_flat_list():
+    flat, groups = cfg._normalize_fault_groups(["a", "b"], None)
+    assert flat == ["a", "b"]
+    assert groups == [{"group": "", "items": ["a", "b"]}]
+
+
+def test_fault_groups_from_dicts():
+    raw = [{"group": "Принтеры", "items": ["x", "y"]}, {"group": "Сеть", "items": ["z"]}]
+    flat, groups = cfg._normalize_fault_groups(raw, None)
+    assert flat == ["x", "y", "z"]
+    assert groups[0]["group"] == "Принтеры"
+
+
+def test_fault_groups_from_hash_headers():
+    flat, groups = cfg._normalize_fault_groups(["## Сеть", "a", "## ПК", "b"], None)
+    assert flat == ["a", "b"]
+    assert [g["group"] for g in groups] == ["Сеть", "ПК"]
+
+
+def test_machine_config_includes_fault_groups():
+    payload = json.dumps({"jira_url": "x", "api_user": "u", "api_password": "p",
+                          "project_key": "K", "fault_groups": [{"group": "G", "items": ["i1"]}]})
+    os.environ["CSL_HELPDESK_CONFIG"] = payload
+    try:
+        c = cfg.load_machine_config()
+        assert c["fault_groups"] == [{"group": "G", "items": ["i1"]}]
+        assert c["faults"] == ["i1"]
+    finally:
+        del os.environ["CSL_HELPDESK_CONFIG"]
+
+
 # ------------------------------------------------------------------- updater
 def test_version_parsing():
     assert updater.parse_version("v12") == 12

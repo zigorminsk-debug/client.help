@@ -11,8 +11,11 @@ AnyDesk/RustDesk) использует WMI / реестр / файлы и кор
 import datetime
 import os
 import platform
+import re
+import shutil
 import socket
 import subprocess
+from pathlib import Path
 
 import psutil
 
@@ -220,53 +223,350 @@ def _network_info() -> list:
 
 
 # --------------------------------------------------------------------------
-# AnyDesk / RustDesk — попытка автоопределения ID (с ручным вводом в GUI)
+# AnyDesk / RustDesk — автоопределение ID.
+#
+# Раньше детект почти всегда возвращал "" на реальных ПК:
+#  - AnyDesk искался только в PATH (anydesk.exe), а он лежит в
+#    C:\Program Files (x86)\AnyDesk\AnyDesk.exe и в PATH его нет;
+#  - реестр HKLM\SOFTWARE\AnyDesk ID обычно не содержит (он в anydesk.conf);
+#  - RustDesk.toml пишет id = '123456789' в одинарных кавычках, а старый
+#    парсер снимал только двойные и возвращал ID вместе с кавычками.
+#
+# Теперь источники проверяются по порядку (быстрые и надёжные — первыми):
+#  AnyDesk:  anydesk.conf (ad_anywhere_id) -> CLI --get-id по полному пути
+#            (Program Files / реестр Uninstall / запущенный процесс) -> реестр.
+#  RustDesk: RustDesk.toml (%APPDATA% / %LOCALAPPDATA% / %PROGRAMDATA% /
+#            рядом с exe / ~/.config) -> CLI --get-id -> реестр.
+# Чистые функции разбора (parse_*/validate_*) вынесены отдельно и покрыты
+# тестами на Linux; Windows-специфичные ветки корректно отключаются вне Windows.
 # --------------------------------------------------------------------------
-def get_anydesk_id() -> str:
-    """AnyDesk умеет отдавать свой ID через CLI: anydesk.exe --get-id"""
-    for exe in ("anydesk.exe", "anydesk"):
+_REMOTE_ID_RE = re.compile(r"\d{6,15}")
+
+
+def validate_remote_id(raw) -> str:
+    """Выделить из произвольного значения правдоподобный ID (6–15 цифр).
+
+    AnyDesk/RustDesk ID — только цифры (обычно 9). Возвращает "" если
+    правдоподобного ID нет. Снимает окружающие кавычки/пробелы.
+    """
+    if raw is None:
+        return ""
+    s = str(raw).strip().strip("'\" \t\r\n")
+    if not s:
+        return ""
+    m = _REMOTE_ID_RE.search(s)
+    return m.group(0) if m else ""
+
+
+def parse_anydesk_conf(text: str) -> str:
+    """Разобрать anydesk.conf: строка ad_anywhere_id = 123456789."""
+    if not text:
+        return ""
+    m = re.search(r"ad_anywhere_id\s*=\s*['\"]?(\d{6,15})['\"]?", text, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"^\s*id\s*=\s*['\"]?(\d{6,15})['\"]?\s*$", text,
+                  re.IGNORECASE | re.MULTILINE)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def parse_rustdesk_toml(text: str) -> str:
+    """Разобрать RustDesk.toml: id = '123456789' (одинарные/двойные/без кавычек)."""
+    if not text:
+        return ""
+    m = re.search(r"^\s*id\s*=\s*['\"]?(\d{6,15})['\"]?\s*$", text, re.MULTILINE)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def extract_cli_id(stdout: str) -> str:
+    """Выделить ID из вывода `*.exe --get-id` (там просто число + перевод строки)."""
+    if not stdout:
+        return ""
+    m = _REMOTE_ID_RE.search(stdout)
+    return m.group(0) if m else ""
+
+
+def _dedupe_paths(paths) -> list:
+    seen = set()
+    out = []
+    for p in paths:
+        if not p:
+            continue
         try:
-            out = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
-                                 timeout=5, creationflags=0x08000000 if os.name == "nt" else 0)
-            if out.returncode == 0 and out.stdout.strip():
-                return out.stdout.strip()
+            key = str(p).lower()
         except Exception:
             continue
-    # Запасной вариант — реестр
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(str(p))
+    return out
+
+
+def _running_process_exes(*needles: str) -> list:
+    """Пути к exe запущенных процессов, чьё имя содержит needle (AnyDesk/RustDesk)."""
+    out = []
+    try:
+        for proc in psutil.process_iter(["name", "exe"]):
+            try:
+                exe = proc.info.get("exe") or ""
+                name = (proc.info.get("name") or "").lower()
+                if exe and any(n in name for n in needles):
+                    out.append(exe)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _registry_uninstall_exe(product: str) -> str:
+    """Найти путь к exe через Uninstall-ключи (InstallLocation/DisplayIcon/Uninstall)."""
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\AnyDesk") as key:
-            for i in range(64):
-                try:
-                    name, value, _ = winreg.EnumValue(key, i)
-                    if name.lower() == "adanywhereid" or (isinstance(value, str) and value.isdigit()):
-                        return value
-                except OSError:
-                    break
+    except Exception:
+        return ""
+    hives = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+    suffixes = [
+        rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{product}",
+        rf"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{product}",
+    ]
+    for hive in hives:
+        for suffix in suffixes:
+            try:
+                with winreg.OpenKey(hive, suffix) as key:
+                    for value_name in ("InstallLocation", "DisplayIcon", "Uninstall"):
+                        try:
+                            value, _ = winreg.QueryValueEx(key, value_name)
+                        except Exception:
+                            continue
+                        s = str(value or "")
+                        # DisplayIcon/Uninstall: "C:\...\AnyDesk.exe,0" или '"C:\...\AnyDesk.exe" /S'
+                        s = s.split(",")[0].strip().strip('"')
+                        # В Uninstall может быть строка с аргументами — взять до пробела вне кавычек.
+                        m = re.search(r"[A-Za-z]:\\[^\"]*?\.exe", s)
+                        candidate = m.group(0) if m else s
+                        if candidate.lower().endswith(".exe") and os.path.isfile(candidate):
+                            return candidate
+            except Exception:
+                continue
+    return ""
+
+
+def _candidate_anydesk_exes() -> list:
+    cands = []
+    for name in ("anydesk.exe", "anydesk"):
+        try:
+            found = shutil.which(name)
+        except Exception:
+            found = None
+        if found:
+            cands.append(found)
+    for env_name, default in (("ProgramFiles", r"C:\Program Files"),
+                              ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                              ("LOCALAPPDATA", ""), ("APPDATA", "")):
+        base = os.environ.get(env_name) or default
+        if base:
+            cands.append(os.path.join(base, "AnyDesk", "AnyDesk.exe"))
+    loc = _registry_uninstall_exe("AnyDesk")
+    if loc:
+        cands.append(loc)
+    cands.extend(_running_process_exes("anydesk"))
+    # Оставляем только реально существующие файлы (which() тоже даёт существующий).
+    return [p for p in _dedupe_paths(cands) if os.path.isfile(p)]
+
+
+def _candidate_rustdesk_exes() -> list:
+    cands = []
+    for name in ("rustdesk.exe", "rustdesk"):
+        try:
+            found = shutil.which(name)
+        except Exception:
+            found = None
+        if found:
+            cands.append(found)
+    for env_name, default in (("ProgramFiles", r"C:\Program Files"),
+                              ("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                              ("LOCALAPPDATA", ""), ("APPDATA", "")):
+        base = os.environ.get(env_name) or default
+        if base:
+            cands.append(os.path.join(base, "RustDesk", "rustdesk.exe"))
+    loc = _registry_uninstall_exe("RustDesk")
+    if loc:
+        cands.append(loc)
+    cands.extend(_running_process_exes("rustdesk"))
+    return [p for p in _dedupe_paths(cands) if os.path.isfile(p)]
+
+
+def _candidate_anydesk_confs(exes=None) -> list:
+    cands = []
+    for env_name, default in (("ProgramData", r"C:\ProgramData"),
+                              ("APPDATA", ""), ("LOCALAPPDATA", "")):
+        base = os.environ.get(env_name) or default
+        if base:
+            cands.append(os.path.join(base, "AnyDesk", "anydesk.conf"))
+    for exe in (exes or []):
+        try:
+            cands.append(os.path.join(os.path.dirname(exe), "anydesk.conf"))
+        except Exception:
+            continue
+    cands.append(os.path.expanduser("~/.config/anydesk/anydesk.conf"))
+    cands.append(os.path.expanduser("~/.anydesk/anydesk.conf"))
+    return _dedupe_paths(cands)
+
+
+def _candidate_rustdesk_confs(exes=None) -> list:
+    cands = []
+    for env_name, default in (("APPDATA", ""), ("LOCALAPPDATA", ""),
+                              ("ProgramData", r"C:\ProgramData")):
+        base = os.environ.get(env_name) or default
+        if base:
+            cands.append(os.path.join(base, "RustDesk", "config", "RustDesk.toml"))
+    for exe in (exes or []):
+        try:
+            d = os.path.dirname(exe)
+            cands.append(os.path.join(d, "RustDesk.toml"))
+            cands.append(os.path.join(d, "config", "RustDesk.toml"))
+        except Exception:
+            continue
+    cands.append(os.path.expanduser("~/.config/rustdesk/RustDesk.toml"))
+    # Легаси-путь через ~ (на случай, если APPDATA не задан).
+    cands.append(os.path.expanduser("~/AppData/Roaming/RustDesk/config/RustDesk.toml"))
+    return _dedupe_paths(cands)
+
+
+def _read_file_id(path: str, parser) -> str:
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    try:
+        return parser(text) or ""
+    except Exception:
+        return ""
+
+
+def _run_cli_get_id(exe: str) -> str:
+    """Запустить `<exe> --get-id` без окна и вернуть ID (или "")."""
+    try:
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+        out = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
+                             timeout=4, creationflags=flags)
+        if out.returncode == 0:
+            return extract_cli_id(out.stdout or "")
     except Exception:
         pass
     return ""
 
 
-def get_rustdesk_id() -> str:
-    """RustDesk хранит ID в конфиге TOML."""
-    candidates = [
-        os.path.join(os.environ.get("ProgramData", ""), "RustDesk", "config", "RustDesk.toml"),
-        os.path.expanduser("~/.config/rustdesk/RustDesk.toml"),
-        os.path.expanduser("~/AppData/Roaming/RustDesk/config/RustDesk.toml"),
-    ]
-    for path in candidates:
+def _read_registry_id(paths) -> str:
+    """Найти ID среди значений реестра (ключи с 'id' в имени — в первую очередь)."""
+    try:
+        import winreg
+    except Exception:
+        return ""
+    fallback = ""
+    for hive, path in paths:
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("id") and "=" in line:
-                        val = line.split("=", 1)[1].strip().strip('"')
-                        if val:
-                            return val
+            with winreg.OpenKey(hive, path) as key:
+                i = 0
+                while True:
+                    try:
+                        name, value, _ = winreg.EnumValue(key, i)
+                    except OSError:
+                        break
+                    i += 1
+                    vid = validate_remote_id(value)
+                    if not vid:
+                        continue
+                    if "id" in str(name).lower():
+                        return vid
+                    if not fallback:
+                        fallback = vid
         except Exception:
             continue
-    return ""
+    return fallback
+
+
+def get_anydesk_id_with_source() -> tuple:
+    """(id, источник) — источник для подписи в GUI, напр. 'конфиг ...'."""
+    exes = _candidate_anydesk_exes()
+    # 1) Конфиг — быстрый и не требует запуска AnyDesk.
+    for path in _candidate_anydesk_confs(exes):
+        vid = _read_file_id(path, parse_anydesk_conf)
+        if vid:
+            return vid, f"конфиг {path}"
+    # 2) CLI по полному пути к exe.
+    for exe in exes:
+        vid = _run_cli_get_id(exe)
+        if vid:
+            return vid, "командная строка AnyDesk"
+    # 3) Реестр (запасной вариант).
+    try:
+        import winreg
+        vid = _read_registry_id([
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\AnyDesk"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\AnyDesk"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\AnyDesk"),
+        ])
+        if vid:
+            return vid, "реестр"
+    except Exception:
+        pass
+    return "", ""
+
+
+def get_rustdesk_id_with_source() -> tuple:
+    """(id, источник) — источник для подписи в GUI."""
+    exes = _candidate_rustdesk_exes()
+    # 1) TOML-конфиг (основной и надёжный источник).
+    for path in _candidate_rustdesk_confs(exes):
+        vid = _read_file_id(path, parse_rustdesk_toml)
+        if vid:
+            return vid, f"конфиг {path}"
+    # 2) CLI.
+    for exe in exes:
+        vid = _run_cli_get_id(exe)
+        if vid:
+            return vid, "командная строка RustDesk"
+    # 3) Реестр (запасной вариант).
+    try:
+        import winreg
+        vid = _read_registry_id([
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\RustDesk"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\RustDesk"),
+        ])
+        if vid:
+            return vid, "реестр"
+    except Exception:
+        pass
+    return "", ""
+
+
+def get_anydesk_id() -> str:
+    """ID AnyDesk ("" если не удалось определить)."""
+    vid, _ = get_anydesk_id_with_source()
+    return vid
+
+
+def get_rustdesk_id() -> str:
+    """ID RustDesk ("" если не удалось определить)."""
+    vid, _ = get_rustdesk_id_with_source()
+    return vid
+
+
+def detect_remote_ids() -> dict:
+    """Оба ID + источники — для асинхронного заполнения полей в GUI."""
+    a_id, a_src = get_anydesk_id_with_source()
+    r_id, r_src = get_rustdesk_id_with_source()
+    return {
+        "anydesk": {"id": a_id, "source": a_src},
+        "rustdesk": {"id": r_id, "source": r_src},
+    }
 
 
 if __name__ == "__main__":
