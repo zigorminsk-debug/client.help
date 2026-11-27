@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.spec
+
+# Тестовые/временные артефакты
+tests/_tmp/
+*.wav
+*csl_shot_*.png
+*csl_voice_*.wav
+
+# Локальные секреты (не коммитить!)
+deploy/config.json
