@@ -185,5 +185,48 @@ def test_updater_get_latest(release_server):
     assert updater.is_newer(rel["tag_name"], "5") is False
 
 
+def test_normalize_phone_international():
+    assert cfg.normalize_phone("29 123 45 67") == "+375 291 234 567"
+    assert cfg.normalize_phone("+375291234567") == "+375 291 234 567"
+    assert cfg.normalize_phone("375291234567") == "+375 291 234 567"
+    assert cfg.normalize_phone("0291234567") == "+375 291 234 567"
+    assert cfg.normalize_phone("") == ""
+    assert cfg.normalize_phone("abc") == ""
+    assert cfg.is_valid_phone("+375 291 234 567") is True
+    assert cfg.is_valid_phone("") is False
+    assert cfg.is_valid_phone("123") is False
+
+
+def test_fault_categories_split(monkeypatch):
+    # По умолчанию — три категории.
+    cats = cfg._normalize_fault_categories(None)
+    assert set(cats) == {"Проблемы с ПК и порталами", "Проблемы с принтерами",
+                         "Добавление и удаление пользователей"}
+    # Плоский список распределяется по категориям по ключевым словам.
+    cats2 = cfg._normalize_fault_categories(
+        ["Не работает принтер", "Нужно добавить пользователя", "Медленно работает"])
+    assert "Не работает принтер" in cats2["Проблемы с принтерами"]
+    assert "Нужно добавить пользователя" in cats2["Добавление и удаление пользователей"]
+    assert "Медленно работает" in cats2["Проблемы с ПК и порталами"]
+    # Словарь-категории проходят через нормализацию как есть.
+    cats3 = cfg._normalize_fault_categories({"X": ["a"], "Y": ["b"]})
+    assert cats3 == {"X": ["a"], "Y": ["b"]}
+
+
+def test_machine_config_has_fault_categories(monkeypatch):
+    payload = json.dumps({
+        "jira_url": "https://example.test",
+        "api_user": "svc",
+        "api_password": "secret",
+        "project_key": "HELP",
+    })
+    monkeypatch.setenv("CSL_HELPDESK_CONFIG", payload)
+    c = cfg.load_machine_config()
+    assert set(c["fault_categories"]) == {"Проблемы с ПК и порталами",
+                                          "Проблемы с принтерами",
+                                          "Добавление и удаление пользователей"}
+    assert c["phone_country_code"] == "+375"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

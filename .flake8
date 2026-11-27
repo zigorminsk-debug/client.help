@@ -1,0 +1,15 @@
+[flake8]
+max-line-length = 120
+extend-ignore =
+    # W503: конфликт с E203 при стилистике разбивки условий
+    W503,
+    # E203: пробел перед ':' (совместимо с Black)
+    E203
+
+# Интенциональные случаи:
+#  - E402: локальные модули импортируются после sys.path.insert (helpdesk_client)
+#    и после настройки sys.path в тестах.
+#  - E702: несколько команд через ';' в встроенном mock HTTP-сервера теста.
+per-file-ignores =
+    src/helpdesk_client.py: E402
+    tests/test_logic.py: E402, E702

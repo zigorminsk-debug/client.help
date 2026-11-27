@@ -35,7 +35,9 @@ deploy/
   build-exe.ps1              Локальная сборка EXE на Windows
 tests/
   test_logic.py        Юнит-тесты логики (config, system_info, jira_client, updater) — без GUI
-.github/workflows/build.yml  CI: сборка EXE на windows-latest + создание Release с порядковым номером
+  .github/workflows/build.yml  CI: проверка кода (check) → сборка EXE на windows-latest + Release с порядковым номером
+assets/
+  icon.png, icon.ico       Иконка приложения (жёлтый треугольник с «!»), используется в EXE и окне
 DEPLOYMENT.md           Подробный гайд развёртывания на клиенте (GPO)
 README.md               Обзор, сценарии реализации, сборка, безопасность
 CHANGELOG.md            История релизов (генерируется CI + ручные заметки)
@@ -43,12 +45,16 @@ CHANGELOG.md            История релизов (генерируется 
 
 ## 3. Ветки и CI
 
-- Рабочая ветка проекта: `arena/9ba65963-client-help` (только в неё коммитим и пушим).
+- Рабочая ветка проекта: `arena/ff36115b-client-help` (только в неё коммитим и пушим).
 - Любой пуш в эту ветку **автоматически** запускает `.github/workflows/build.yml`.
-- Воркфлоу: ставит Python, собирает EXE (PyInstaller, `--onefile --windowed`),
-  **вычисляет порядковый номер версии** = (число существующих релизов) + 1, прописывает
-  его в `src/_version.py`, создаёт GitHub Release `vN` с вложением `CSLHelpdesk.exe`
-  и выкладывает артефакт. Не пушит код обратно (поэтому нет цикла сборок).
+- Воркфлоу **сначала проверяет код** (job `check`): `compileall` (синтаксис) → `flake8`
+  (lint, конфиг `.flake8`) → `pytest` (тесты). **Релиз выходит только после успешного
+  прохождения проверки** — job `build` имеет `needs: check`. Если проверка падает —
+  сборка/релиз не выполняются.
+- Если проверка прошла: ставит Python, собирает EXE (PyInstaller, `--onefile --windowed`,
+  `--icon assets/icon.png`), **вычисляет порядковый номер версии** = (число существующих
+  релизов) + 1, прописывает его в `src/_version.py`, создаёт GitHub Release `vN` с
+  вложением `CSLHelpdesk.exe` и выкладывает артефакт. Не пушит код обратно.
 - Для ручного запуска: вкладка Actions → «Build & Release CSL Helpdesk Client» → Run workflow.
 
 ### Важно про нумерацию версий
