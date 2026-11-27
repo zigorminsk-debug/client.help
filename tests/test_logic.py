@@ -62,6 +62,18 @@ def test_user_data_roundtrip(tmp_path, monkeypatch):
     assert d["phone"] == "+375291112233"
 
 
+def test_machine_config_from_localappdata(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    p = tmp_path / "CSL" / "HelpdeskClient"
+    p.mkdir(parents=True)
+    (p / "config.json").write_text(
+        json.dumps({"jira_url": "x", "api_user": "u", "api_password": "p", "project_key": "K"}),
+        encoding="utf-8",
+    )
+    c = cfg.load_machine_config()
+    assert c["project_key"] == "K"
+
+
 # ----------------------------------------------------------------- system info
 def test_system_info_collects():
     info = sysinfo.get_system_info()

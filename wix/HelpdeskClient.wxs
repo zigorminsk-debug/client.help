@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 инсталлятор клиента CSL Helpdesk.
+
+  Устанавливает ПЕР-ПОЛЬЗОВАТЕЛЬСКИ (Scope="perUser") в
+  %LocalAppData%\CSL\HelpdeskClient — профиль пользователя, поэтому:
+    * не требует прав администратора при установке через GPO-логон;
+    * приложение может самообновляться (заменять свой EXE) без UAC.
+  Создаёт ярлыки на Рабочем столе и в меню Пуск для каждого пользователя.
+
+  Версия MSI задаётся при сборке: wix build -dMsiVersion=1.0.<N>
+  UpgradeCode фиксирован — обеспечивает корректный MajorUpgrade между версиями.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="CSL Helpdesk Client"
+           Manufacturer="CSL"
+           Version="$(var.MsiVersion)"
+           UpgradeCode="2F4A9C1B-7E3D-4B5A-9C8E-1F2A3B4C5D6E"
+           Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="Уже установлена более новая версия приложения." />
+    <MediaTemplate EmbedCab="yes" />
+    <SummaryInformation Description="CSL Helpdesk Client — заявки в техподдержку (Jira)" />
+  </Package>
+
+  <StandardDirectory Id="LocalAppDataFolder">
+    <Directory Id="CSLCo" Name="CSL">
+      <Directory Id="INSTALLFOLDER" Name="HelpdeskClient" />
+    </Directory>
+  </StandardDirectory>
+
+  <StandardDirectory Id="ProgramMenuFolder">
+    <Directory Id="AppMenuDir" Name="CSL Helpdesk" />
+  </StandardDirectory>
+
+  <StandardDirectory Id="DesktopFolder" />
+
+  <ComponentGroup Id="AppFiles">
+    <Component Id="ExeComp" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="CSLHelpdesk.exe" Source="dist\CSLHelpdesk.exe" KeyPath="yes" />
+    </Component>
+    <Component Id="ConfigComp" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="config.json" Source="deploy\config.json" KeyPath="yes" />
+    </Component>
+  </ComponentGroup>
+
+  <ComponentGroup Id="Shortcuts">
+    <Component Id="StartMenuSc" Directory="AppMenuDir" Guid="*">
+      <Shortcut Id="StartMenuShortcut" Name="CSL Helpdesk"
+                Target="[INSTALLFOLDER]CSLHelpdesk.exe" WorkingDirectory="INSTALLFOLDER" />
+    </Component>
+    <Component Id="DesktopSc" Directory="DesktopFolder" Guid="*">
+      <Shortcut Id="DesktopShortcut" Name="CSL Helpdesk"
+                Target="[INSTALLFOLDER]CSLHelpdesk.exe" WorkingDirectory="INSTALLFOLDER" />
+    </Component>
+  </ComponentGroup>
+
+  <Feature Id="ProductFeature" Title="CSL Helpdesk Client" Level="1">
+    <ComponentGroupRef Id="AppFiles" />
+    <ComponentGroupRef Id="Shortcuts" />
+  </Feature>
+</Wix>

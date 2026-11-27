@@ -1,6 +1,6 @@
 name: Build & Release CSL Helpdesk Client
 
-# Сборка и выкладка EXE выполняются АВТОМАТИЧЕСКИ при каждом пуше в ветку проекта,
+# Сборка и выкладка EXE + MSI выполняются АВТОМАТИЧЕСКИ при каждом пуше в ветку проекта,
 # а также вручную (workflow_dispatch).
 on:
   push:
@@ -30,8 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
 
-      # Каждой УДАЧНОЙ сборке присваивается ПОРЯДКОВЫЙ номер = (число существующих
-      # релизов) + 1. Подсчёт по релизам исключает дыры при неудачных сборках.
+      # Каждой УДАЧНОЙ сборке присваивается ПОРЯДКОВЫЙ номер = (число релизов) + 1.
       - name: Compute next version number
         id: version
         shell: bash
@@ -45,7 +44,7 @@ jobs:
           echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
           echo "Next build number: $NEXT (existing releases: $COUNT)"
 
-      # Прописываем номер версии в сборку (читается приложением в заголовке/«О программе»).
+      # Прописываем номер версии в сборку (читается приложением).
       - name: Write version file
         shell: pwsh
         run: |
@@ -68,7 +67,21 @@ jobs:
           --hidden-import=config --hidden-import=updater --hidden-import=_version
           src/helpdesk_client.py
 
-      # Список изменений берём из git-лога с момента предыдущего тега.
+      # MSI использует конфиг по умолчанию из шаблона (github_repo уже корректен);
+      # реальные учётные данные Jira админ задаёт через GPO/реестр (перекрывают этот).
+      - name: Prepare MSI config (default from template; admin overrides via GPO)
+        shell: bash
+        run: cp deploy/admin-config.json.template deploy/config.json
+
+      - name: Install WiX (dotnet tool, v4)
+        run: dotnet tool install --global wix
+
+      - name: Build MSI (per-user, WiX v4)
+        shell: pwsh
+        run: |
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          wix build wix/HelpdeskClient.wxs -dMsiVersion="1.0.${{ steps.version.outputs.number }}" -o dist/CSLHelpdesk.msi
+
       - name: Generate release notes
         shell: bash
         run: |
@@ -78,24 +91,22 @@ jobs:
           else
             LOG=$(git log "${LAST_TAG}..HEAD" --oneline)
           fi
-          {
-            echo "## Изменения в сборке"
-            echo ""
-            echo "$LOG" | sed 's/^/- /'
-          } > notes.md
+          { echo "## Изменения в сборке"; echo ""; echo "$LOG" | sed 's/^/- /'; } > notes.md
           cat notes.md
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (EXE + MSI)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" `
             --title "CSL Helpdesk v${{ steps.version.outputs.number }}" `
             --notes-file notes.md `
-            dist/CSLHelpdesk.exe
+            dist/CSLHelpdesk.exe dist/CSLHelpdesk.msi
 
-      - name: Upload artifact (дублирующее копирование из Actions)
+      - name: Upload artifact (EXE + MSI)
         uses: actions/upload-artifact@v4
         with:
           name: CSLHelpdesk-v${{ steps.version.outputs.number }}
-          path: dist/CSLHelpdesk.exe
+          path: |
+            dist/CSLHelpdesk.exe
+            dist/CSLHelpdesk.msi

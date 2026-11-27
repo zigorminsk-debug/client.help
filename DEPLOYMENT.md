@@ -76,6 +76,28 @@ EXE собирается автоматически GitHub Actions при каж
 
 ---
 
+## 4.1. Развёртывание через MSI (WiX) — рекомендуется
+
+Готовый `CSLHelpdesk.msi` собирается автоматически CI вместе с EXE и выкладывается
+в релиз (актив `CSLHelpdesk.msi`). Либо соберите локально: `powershell -File deploy\build-all.ps1`.
+
+**Важная особенность:** MSI устанавливает **пер-пользовательски** в
+`%LocalAppData%\CSL\HelpdeskClient` (НЕ в ProgramData), поэтому:
+- установка через GPO не требует прав администратора;
+- приложение может **самообновляться** (заменять свой EXE) без UAC-запроса.
+
+Способы развёртывания MSI через GPO:
+- **A) User Configuration → Policies → Software Installation → Publish** (или Assign).
+  Пользователи получают приложение при входе; ярлык появляется в меню Пуск и на Рабочем столе.
+- **Б) Logon-скрипт:** `msiexec /i \\SHARE\CSLHelpdesk.msi /qn /norestart`
+
+Общий конфиг (единый логин Jira) MSI кладёт рядом с EXE; при необходимости админ
+перекрывает его через GPO Preferences (реестр `HKLM\SOFTWARE\CSL\Helpdesk`) или файл в
+ProgramData — они имеют приоритет (см. `src/config.py`, `_config_candidate_paths`).
+
+Переустановка/обновление: в WiX настроен `MajorUpgrade` — при установке MSI с бо́льшей
+версией предыдущая per-user-версия удаляется автоматически.
+
 ## 5. Настройка GPO (логон-скрипт)
 
 1. **Group Policy Management** → создайте/выберите GPO, привяжите к нужному OU

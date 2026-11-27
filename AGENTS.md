@@ -33,6 +33,9 @@ deploy/
   Install-HelpdeskClient.ps1  GPO Logon-скрипт: копирует EXE+конфиг, создаёт ярлык
   Uninstall-HelpdeskClient.ps1 Удаление
   build-exe.ps1              Локальная сборка EXE на Windows
+  build-all.ps1              Локальная сборка EXE + MSI (WiX v4)
+wix/
+  HelpdeskClient.wxs       WiX v4 инсталлятор (per-user MSI в LocalAppData)
 tests/
   test_logic.py        Юнит-тесты логики (config, system_info, jira_client, updater) — без GUI
 .github/workflows/build.yml  CI: сборка EXE на windows-latest + создание Release с порядковым номером
@@ -61,10 +64,16 @@ CHANGELOG.md            История релизов (генерируется 
 ```powershell
 python -m pip install -r requirements.txt pyinstaller
 pyinstaller --onefile --windowed --name CSLHelpdesk src/helpdesk_client.py
-# либо: powershell -File deploy\build-exe.ps1
+# либо собрать сразу EXE + MSI (WiX v4):
+#   powershell -File deploy\build-all.ps1
 ```
-Результат: `dist\CSLHelpdesk.exe`. Локально `APP_VERSION="0"` → автообновление отключено
-(это нормально; в CI оно перезаписывается).
+Результат: `dist\CSLHelpdesk.exe` (и `dist\CSLHelpdesk.msi` при build-all). Локально
+`APP_VERSION="0"` → автообновление отключено (это нормально; в CI оно перезаписывается).
+
+MSI (`wix/HelpdeskClient.wxs`) устанавливает **per-user** в LocalAppData, чтобы клиент
+самообновлялся без прав админа. Собирается командой `wix build wix/HelpdeskClient.wxs
+-dMsiVersion=1.0.N -o dist/CSLHelpdesk.msi` (WiX v4 как dotnet tool). CI делает это
+автоматически и выкладывает MSI в тот же релиз, что и EXE.
 
 ## 5. Как тестировать логику (можно на Linux/macOS)
 

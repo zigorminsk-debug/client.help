@@ -15,3 +15,6 @@ tests/_tmp/
 
 # Локальные секреты (не коммитить!)
 deploy/config.json
+
+# Собранные инсталляторы (лежат в GitHub Releases, не в Git)
+*.msi

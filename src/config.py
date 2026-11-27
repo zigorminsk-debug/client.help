@@ -17,6 +17,7 @@ config.py — конфигурация клиента заявок CSL Helpdesk.
 
 import json
 import os
+import sys
 from pathlib import Path
 
 VENDOR = "CSL"
@@ -78,27 +79,45 @@ def _read_registry_config() -> dict:
     return result
 
 
+def _config_candidate_paths():
+    """Пути к административному config.json в порядке поиска."""
+    prog = os.environ.get("ProgramData", r"C:\ProgramData")
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    try:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    except Exception:
+        exe_dir = ""
+    candidates = [
+        os.path.join(prog, VENDOR, APP_NAME, "config.json"),  # machine-wide (GPO/админ)
+        os.path.join(base, VENDOR, APP_NAME, "config.json"),  # per-user (MSI-установка)
+    ]
+    if exe_dir:
+        candidates.insert(0, os.path.join(exe_dir, "config.json"))  # рядом с EXE (portable)
+    return [p for p in candidates if p and os.path.exists(p)]
+
+
 def load_machine_config() -> dict:
     """
     Загружает и нормализует административный конфиг.
+    Источники (по приоритету): реестр HKLM (GPO Preferences) → файлы config.json
+    (ProgramData > LocalAppData > рядом с EXE) → переменная окружения (тесты).
     Ключи: jira_url, api_user, api_password, project_key, issue_type,
            faults (list), verify_ssl (bool), github_repo, github_token,
            update_enabled (bool)
     """
     raw = {}
 
-    # 1) Реестр (GPO Preferences)
+    # 1) Реестр (GPO Preferences) — наивысший приоритет для администратора
     raw.update(_read_registry_config())
 
-    # 2) Файл config.json в ProgramData (GPO-логон-скрипт)
-    p = machine_config_path()
-    if p.exists():
+    # 2) Файлы config.json (ProgramData > LocalAppData > рядом с EXE)
+    for p in _config_candidate_paths():
         try:
-            raw.update(json.loads(p.read_text(encoding="utf-8")))
+            raw.update(json.loads(Path(p).read_text(encoding="utf-8")))
         except Exception:
             pass
 
-    # 3) Переменная окружения (для локальных тестов)
+    # 3) Переменная окружения (для локальных тестов) — перекрывает всё
     env = os.environ.get("CSL_HELPDESK_CONFIG")
     if env:
         try:

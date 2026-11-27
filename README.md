@@ -12,9 +12,9 @@
 ## Быстрый старт для администратора
 
 1. Создайте сервисный аккаунт Jira (только право создавать заявки) — см. безопасность.
-2. Соберите `CSLHelpdesk.exe` — он **создаётся автоматически** GitHub Actions при каждом
-   пуше (готовый файл в **Releases** / артефактах Actions). Либо локально:
-   `powershell -File deploy\build-exe.ps1`.
+2. Соберите `CSLHelpdesk.exe` и `CSLHelpdesk.msi` — они **создаются автоматически**
+   GitHub Actions при каждом пуше (готовые файлы в **Releases** / артефактах Actions).
+   Либо локально: `powershell -File deploy\build-all.ps1` (EXE + MSI через WiX).
 3. Заполните `deploy/admin-config.json.template` (Jira + `github_repo`) → `config.json`.
 4. Положите `CSLHelpdesk.exe` и `config.json` на GPO-шару и назначьте
    `deploy/Install-HelpdeskClient.ps1` как **Logon**-скрипт.
