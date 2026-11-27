@@ -23,17 +23,92 @@ VENDOR = "CSL"
 APP_NAME = "HelpdeskClient"
 APP_TITLE = "CSL — Заявка в техподдержку"
 
-# Список неисправностей по умолчанию (используется, если не задан в админ-конфиге)
-DEFAULT_FAULTS = [
-    "Не включается / не загружается",
-    "Не работает интернет / сеть",
-    "Медленно работает",
-    "Не работает принтер / сканер",
-    "Не работает программа / ПО",
-    "Проблема с электронной почтой",
-    "Нужна установка / настройка ПО",
-    "Прочее (описано в комментарии)",
+# Список неисправностей по умолчанию (используется, если не задан в админ-конфиге).
+# Группировка — как в окне v3: заголовки групп + пункты в одну колонку.
+DEFAULT_FAULT_GROUPS = [
+    {"group": "Проблемы с ПК и порталами", "items": [
+        "Не включается / не загружается",
+        "Не работает интернет / сеть",
+        "Медленно работает",
+        "Не работает программа / ПО",
+        "Проблема с электронной почтой",
+        "Нужна установка / настройка ПО",
+        "Прочее (описано в комментарии)",
+    ]},
+    {"group": "Проблемы с принтерами", "items": [
+        "Не работает принтер",
+        "Не работает сканер",
+        "Не подключается принтер по сети",
+        "Нужна заправка / ремонт принтера",
+    ]},
+    {"group": "Добавление и удаление пользователей", "items": [
+        "Нужно добавить пользователя",
+        "Нужно удалить пользователя",
+        "Нужно изменить права доступа",
+        "Восстановление учётной записи",
+    ]},
 ]
+DEFAULT_FAULTS = [item for g in DEFAULT_FAULT_GROUPS for item in g["items"]]
+
+
+def _normalize_fault_groups(faults_raw, groups_raw):
+    """Привести неисправности к виду (flat_list, groups_list).
+
+    Поддерживаемые форматы админ-конфига:
+      - fault_groups: [{"group": "...", "items": [...]}, ...]
+      - fault_groups: {"Группа": [...], ...}
+      - faults: [{"group": "...", "items": [...]}, ...]
+      - faults: ["## Группа", "пункт", ...]  (строка с "## " — заголовок группы)
+      - faults: ["пункт", ...]  (плоский список — одна группа без заголовка)
+    Если ничего не задано — возвращаются DEFAULT_FAULT_GROUPS.
+    """
+    def _from_groups(raw):
+        groups = []
+        if isinstance(raw, dict):
+            for name, items in raw.items():
+                if isinstance(items, (list, tuple)):
+                    groups.append({"group": str(name), "items": [str(x) for x in items if str(x).strip()]})
+        elif isinstance(raw, (list, tuple)):
+            for entry in raw:
+                if isinstance(entry, dict):
+                    name = entry.get("group") or entry.get("name") or entry.get("title") or ""
+                    items = entry.get("items") or entry.get("faults") or entry.get("list") or []
+                    if isinstance(items, str):
+                        items = [x.strip() for x in items.split(";") if x.strip()]
+                    groups.append({"group": str(name), "items": [str(x) for x in items if str(x).strip()]})
+                elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    groups.append({"group": str(entry[0]), "items": [str(x) for x in entry[1] if str(x).strip()]})
+        groups = [g for g in groups if g["items"]]
+        return groups or None
+
+    groups = _from_groups(groups_raw)
+    if groups is None and isinstance(faults_raw, (list, tuple)) and faults_raw and isinstance(faults_raw[0], dict):
+        groups = _from_groups(faults_raw)
+    if groups is None and isinstance(faults_raw, (list, tuple)):
+        flat = []
+        current = {"group": "", "items": []}
+        grouped = []
+        for entry in faults_raw:
+            s = str(entry).strip()
+            if not s:
+                continue
+            if s.startswith("## "):
+                if current["items"]:
+                    grouped.append(current)
+                current = {"group": s[3:].strip(), "items": []}
+            else:
+                flat.append(s)
+                current["items"].append(s)
+        if current["items"]:
+            grouped.append(current)
+        if grouped and any(g["group"] for g in grouped):
+            groups = grouped
+        elif flat:
+            groups = [{"group": "", "items": flat}]
+    if not groups:
+        groups = [{"group": g["group"], "items": list(g["items"])} for g in DEFAULT_FAULT_GROUPS]
+    flat_list = [item for g in groups for item in g["items"]]
+    return flat_list, groups
 
 
 def machine_config_path() -> Path:
@@ -82,7 +157,8 @@ def load_machine_config() -> dict:
     """
     Загружает и нормализует административный конфиг.
     Ключи: jira_url, api_user, api_password, project_key, issue_type,
-           faults (list), verify_ssl (bool), github_repo, github_token,
+           faults (плоский list), fault_groups (list of {group, items}),
+           verify_ssl (bool), github_repo, github_token,
            update_enabled (bool)
     """
     raw = {}
@@ -113,11 +189,11 @@ def load_machine_config() -> dict:
                 return raw[n]
         return default
 
-    faults = get("faults", "fault_list", "faults_list")
-    if isinstance(faults, str):
-        faults = [f.strip() for f in faults.split(";") if f.strip()]
-    if not faults:
-        faults = list(DEFAULT_FAULTS)
+    faults_raw = get("faults", "fault_list", "faults_list")
+    if isinstance(faults_raw, str):
+        faults_raw = [f.strip() for f in faults_raw.split(";") if f.strip()]
+    groups_raw = get("fault_groups", "faultgroups", "fault_groups_list")
+    faults, fault_groups = _normalize_fault_groups(faults_raw, groups_raw)
 
     verify = get("verify_ssl", "verifyssl", default=True)
     if isinstance(verify, str):
@@ -140,6 +216,7 @@ def load_machine_config() -> dict:
         "project_key": get("project_key", "project", "jira_project") or "",
         "issue_type": get("issue_type", "issuetype", default="Запрос") or "Запрос",
         "faults": faults,
+        "fault_groups": fault_groups,
         "verify_ssl": bool(verify),
         "github_repo": github_repo or "",
         "github_token": get("github_token", "token") or "",

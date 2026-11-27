@@ -57,6 +57,9 @@ class HelpdeskApp:
 
         self._build_ui()
         self._collect_system_info()
+        # Автоопределение AnyDesk/RustDesk ID — в фоне, чтобы окно не висело
+        # на subprocess/чтении конфигов. Поля заполнятся по готовности.
+        self._start_id_detection()
 
         if not self.user_data.get("phone"):
             self._prompt_phone()
@@ -74,10 +77,27 @@ class HelpdeskApp:
             self.root.after(2500, self._auto_check_update)
 
     # ------------------------------------------------------------------ UI
+    # Окно целиком в прокручиваемой области: на маленьких экранах и при
+    # масштабе 125–150% контент не обрезается, а прокручивается.
+    # Чекбоксы — в ОДНУ колонку (раньше две колонки grid'ом вылезали за
+    # правый край окна и уходили под плавающую панель RustDesk).
     def _build_ui(self):
-        pad = {"padx": 8, "pady": 4}
-        f = ttk.Frame(self.root)
-        f.pack(fill="both", expand=True, **pad)
+        outer = ttk.Frame(self.root)
+        outer.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(outer, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        self.inner = ttk.Frame(self.canvas, padding=8)
+        self._inner_window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self._bind_mousewheel()
+
+        f = self.inner
 
         ttk.Label(f, text="Заявка в техподдержку CSL",
                   font=("Segoe UI", 14, "bold")).pack(anchor="w")
@@ -87,56 +107,83 @@ class HelpdeskApp:
         # --- Контактные данные ---
         contact = ttk.LabelFrame(f, text="Контактные данные")
         contact.pack(fill="x", pady=6)
-        ttk.Label(contact, text="Контактный телефон:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        contact.columnconfigure(1, weight=1)
+
+        ttk.Label(contact, text="Телефон *").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.phone_var = tk.StringVar(value=self.user_data.get("phone", ""))
-        self.phone_entry = ttk.Entry(contact, textvariable=self.phone_var, width=30)
-        self.phone_entry.grid(row=0, column=1, sticky="w", padx=6, pady=4)
+        self.phone_entry = ttk.Entry(contact, textvariable=self.phone_var)
+        self.phone_entry.grid(row=0, column=1, sticky="ew", padx=6, pady=4)
         self.phone_entry.bind("<FocusOut>", lambda e: self._save_phone())
-        ttk.Button(contact, text="Сохранить", command=self._save_phone).grid(row=0, column=2, padx=6)
+        ttk.Button(contact, text="Сохранить", command=self._save_phone).grid(row=0, column=2, padx=6, pady=4)
+        ttk.Label(contact, text="обязательный, международный формат",
+                  foreground="#777").grid(row=1, column=1, sticky="w", padx=6)
 
-        ttk.Label(contact, text="AnyDesk ID:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        self.anydesk_var = tk.StringVar(value=self.user_data.get("anydesk") or sysinfo.get_anydesk_id())
-        ttk.Entry(contact, textvariable=self.anydesk_var, width=30).grid(row=1, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(contact, text="AnyDesk ID").grid(row=2, column=0, sticky="w", padx=6, pady=4)
+        self.anydesk_var = tk.StringVar(value=self.user_data.get("anydesk", ""))
+        self.anydesk_entry = ttk.Entry(contact, textvariable=self.anydesk_var)
+        self.anydesk_entry.grid(row=2, column=1, sticky="ew", padx=6, pady=4)
+        self.anydesk_entry.bind("<FocusOut>", lambda e: self._save_phone())
+        self.anydesk_status = tk.StringVar(value="поиск AnyDesk ID...")
+        ttk.Label(contact, textvariable=self.anydesk_status,
+                  foreground="#777").grid(row=3, column=1, sticky="w", padx=6)
 
-        ttk.Label(contact, text="RustDesk ID:").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        self.rustdesk_var = tk.StringVar(value=self.user_data.get("rustdesk") or sysinfo.get_rustdesk_id())
-        ttk.Entry(contact, textvariable=self.rustdesk_var, width=30).grid(row=2, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(contact, text="RustDesk ID").grid(row=4, column=0, sticky="w", padx=6, pady=4)
+        self.rustdesk_var = tk.StringVar(value=self.user_data.get("rustdesk", ""))
+        self.rustdesk_entry = ttk.Entry(contact, textvariable=self.rustdesk_var)
+        self.rustdesk_entry.grid(row=4, column=1, sticky="ew", padx=6, pady=4)
+        self.rustdesk_entry.bind("<FocusOut>", lambda e: self._save_phone())
+        self.rustdesk_status = tk.StringVar(value="поиск RustDesk ID...")
+        ttk.Label(contact, textvariable=self.rustdesk_status,
+                  foreground="#777").grid(row=5, column=1, sticky="w", padx=6)
 
-        # --- Неисправности (чекбоксы) ---
+        self.refresh_ids_btn = ttk.Button(contact, text="Обновить ID",
+                                          command=self._start_id_detection)
+        self.refresh_ids_btn.grid(row=2, column=2, rowspan=4, padx=6, pady=4, sticky="ns")
+
+        # --- Неисправности (чекбоксы, одна колонка + группы) ---
         faults = ttk.LabelFrame(f, text="Что не работает? (отметьте нужное)")
         faults.pack(fill="x", pady=6)
         self.fault_vars = []
-        for i, label in enumerate(self.machine_cfg.get("faults", cfg.DEFAULT_FAULTS)):
-            v = tk.BooleanVar()
-            self.fault_vars.append((label, v))
-            cb = ttk.Checkbutton(faults, text=label, variable=v)
-            cb.grid(row=i // 2, column=i % 2, sticky="w", padx=8, pady=2)
+        groups = self.machine_cfg.get("fault_groups") or [
+            {"group": "", "items": self.machine_cfg.get("faults", cfg.DEFAULT_FAULTS)}]
+        for g in groups:
+            gname = (g.get("group") or "").strip() if isinstance(g, dict) else ""
+            items = g.get("items", []) if isinstance(g, dict) else [g]
+            if gname:
+                ttk.Label(faults, text=gname,
+                          font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
+            for label in items:
+                v = tk.BooleanVar()
+                self.fault_vars.append((label, v))
+                cb = ttk.Checkbutton(faults, text=label, variable=v)
+                cb.pack(anchor="w", padx=12, pady=1, fill="x")
 
         # --- Комментарий ---
         cm = ttk.LabelFrame(f, text="Комментарий (текст)")
         cm.pack(fill="x", pady=6)
-        self.comment = tk.Text(cm, height=4, width=60, wrap="word")
-        self.comment.pack(fill="x", padx=6, pady=4)
+        self.comment = tk.Text(cm, height=4, wrap="word")
+        self.comment.pack(fill="both", expand=True, padx=6, pady=4)
         if self.user_data.get("comment"):
             self.comment.insert("1.0", self.user_data.get("comment"))
 
         # --- Вложения: скриншот и голос ---
         att = ttk.LabelFrame(f, text="Вложения")
         att.pack(fill="x", pady=6)
+        att.columnconfigure(1, weight=1)
 
         self.shot_btn = ttk.Button(att, text="Сделать скриншот", command=self._take_screenshot)
-        self.shot_btn.grid(row=0, column=0, padx=6, pady=4)
+        self.shot_btn.grid(row=0, column=0, padx=6, pady=4, sticky="w")
         self.shot_label = ttk.Label(att, text="скриншот не сделан", foreground="#777")
-        self.shot_label.grid(row=0, column=1, padx=6, pady=4)
+        self.shot_label.grid(row=0, column=1, padx=6, pady=4, sticky="w")
         self.shot_clear = ttk.Button(att, text="Убрать", command=self._clear_screenshot)
-        self.shot_clear.grid(row=0, column=2, padx=6, pady=4)
+        self.shot_clear.grid(row=0, column=2, padx=6, pady=4, sticky="e")
 
         self.voice_btn = ttk.Button(att, text="Записать голос", command=self._toggle_voice)
-        self.voice_btn.grid(row=1, column=0, padx=6, pady=4)
+        self.voice_btn.grid(row=1, column=0, padx=6, pady=4, sticky="w")
         self.voice_label = ttk.Label(att, text="голосовое не записано", foreground="#777")
-        self.voice_label.grid(row=1, column=1, padx=6, pady=4)
+        self.voice_label.grid(row=1, column=1, padx=6, pady=4, sticky="w")
         self.voice_clear = ttk.Button(att, text="Убрать", command=self._clear_voice)
-        self.voice_clear.grid(row=1, column=2, padx=6, pady=4)
+        self.voice_clear.grid(row=1, column=2, padx=6, pady=4, sticky="e")
 
         if not audio.is_available():
             self.voice_btn.configure(state="disabled")
@@ -144,24 +191,109 @@ class HelpdeskApp:
 
         # --- Кнопки действий ---
         actions = ttk.Frame(f)
-        actions.pack(pady=8)
+        actions.pack(pady=8, fill="x")
         self.submit_btn = ttk.Button(actions, text="Отправить заявку", command=self._on_submit)
-        self.submit_btn.grid(row=0, column=0, padx=6)
+        self.submit_btn.pack(side="left", padx=4)
         self.update_btn = ttk.Button(actions, text="Проверить обновления",
                                      command=self._manual_check_update)
         if not self.machine_cfg.get("update_enabled"):
             self.update_btn.configure(state="disabled")
-        self.update_btn.grid(row=0, column=1, padx=6)
-        ttk.Button(actions, text="О программе", command=self._about).grid(row=0, column=2, padx=6)
+        self.update_btn.pack(side="left", padx=4)
+        ttk.Button(actions, text="О программе", command=self._about).pack(side="left", padx=4)
 
         # --- Статус ---
         self.status = tk.StringVar(value=f"Готово. Версия {APP_VERSION}")
         ttk.Label(f, textvariable=self.status, foreground="#333").pack(anchor="w")
 
         # --- Сведения о ПК ---
-        self.sys_text = tk.Text(f, height=10, width=80, wrap="word", state="disabled",
+        self.sys_text = tk.Text(f, height=6, wrap="word", state="disabled",
                                 bg="#f7f7f7", fg="#222")
         self.sys_text.pack(fill="x", pady=6)
+
+    def _on_inner_configure(self, event=None):
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception:
+            pass
+
+    def _on_canvas_configure(self, event=None):
+        try:
+            if event is not None:
+                self.canvas.itemconfig(self._inner_window, width=event.width)
+        except Exception:
+            pass
+
+    def _bind_mousewheel(self):
+        def _scroll(event):
+            # Не перехватывать прокрутку внутри текстовых полей.
+            if isinstance(getattr(event, "widget", None), tk.Text):
+                return
+            try:
+                if getattr(event, "delta", 0):
+                    self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                elif getattr(event, "button", None) == 4:
+                    self.canvas.yview_scroll(-3, "units")
+                elif getattr(event, "button", None) == 5:
+                    self.canvas.yview_scroll(3, "units")
+            except Exception:
+                pass
+        try:
+            self.root.bind_all("<MouseWheel>", _scroll, add="+")
+            self.root.bind_all("<Button-4>", _scroll, add="+")
+            self.root.bind_all("<Button-5>", _scroll, add="+")
+        except Exception:
+            pass
+
+    # ------------------------------------------------- AnyDesk/RustDesk ID
+    def _start_id_detection(self):
+        """Запуск фонового автоопределения ID (кнопка «Обновить ID» и старт)."""
+        if not hasattr(self, "anydesk_status"):
+            return
+        self.anydesk_status.set("поиск AnyDesk ID...")
+        self.rustdesk_status.set("поиск RustDesk ID...")
+        threading.Thread(target=self._detect_ids_thread, daemon=True).start()
+
+    def _detect_ids_thread(self):
+        try:
+            res = sysinfo.detect_remote_ids()
+        except Exception:
+            res = {"anydesk": {"id": "", "source": ""},
+                   "rustdesk": {"id": "", "source": ""}}
+        try:
+            self.root.after(0, lambda: self._apply_detected_ids(res))
+        except Exception:
+            pass
+
+    def _apply_detected_ids(self, res):
+        changed = False
+        a = res.get("anydesk", {}) or {}
+        if a.get("id"):
+            # Свежий ID с ПК важнее сохранённого (ПК могли переустановить).
+            self.anydesk_var.set(a["id"])
+            self.anydesk_status.set(f"найден автоматически ({a.get('source', 'AnyDesk')})")
+            self.user_data["anydesk"] = a["id"]
+            changed = True
+        elif self.anydesk_var.get().strip():
+            self.anydesk_status.set("автоопределение не удалось — проверьте ID вручную")
+        else:
+            self.anydesk_status.set("не найден — введите ID вручную")
+
+        r = res.get("rustdesk", {}) or {}
+        if r.get("id"):
+            self.rustdesk_var.set(r["id"])
+            self.rustdesk_status.set(f"найден автоматически ({r.get('source', 'RustDesk')})")
+            self.user_data["rustdesk"] = r["id"]
+            changed = True
+        elif self.rustdesk_var.get().strip():
+            self.rustdesk_status.set("автоопределение не удалось — проверьте ID вручную")
+        else:
+            self.rustdesk_status.set("не найден — введите ID вручную")
+
+        if changed:
+            try:
+                cfg.save_user_data(self.user_data)
+            except Exception:
+                pass
 
     # ---------------------------------------------------------- system info
     def _collect_system_info(self):
@@ -205,11 +337,21 @@ class HelpdeskApp:
         self.root.wait_window(win)
 
     def _save_phone(self):
-        self.user_data["phone"] = self.phone_var.get().strip()
-        self.user_data["anydesk"] = self.anydesk_var.get().strip()
-        self.user_data["rustdesk"] = self.rustdesk_var.get().strip()
-        self.user_data["comment"] = self.comment.get("1.0", "end").strip()
-        cfg.save_user_data(self.user_data)
+        if hasattr(self, "phone_var"):
+            self.user_data["phone"] = self.phone_var.get().strip()
+        if hasattr(self, "anydesk_var"):
+            self.user_data["anydesk"] = self.anydesk_var.get().strip()
+        if hasattr(self, "rustdesk_var"):
+            self.user_data["rustdesk"] = self.rustdesk_var.get().strip()
+        if hasattr(self, "comment"):
+            try:
+                self.user_data["comment"] = self.comment.get("1.0", "end").strip()
+            except Exception:
+                pass
+        try:
+            cfg.save_user_data(self.user_data)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ screenshot
     def _take_screenshot(self):
@@ -401,9 +543,21 @@ class HelpdeskApp:
 
 
 def main():
+    # DPI awareness до создания окна (Windows): иначе при масштабе 125–150%
+    # шрифты/контролы выглядят размыто, а окно уезжает за край экрана.
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
     root = tk.Tk()
     try:
-        root.geometry("640x780")
+        width = 720
+        height = min(900, root.winfo_screenheight() - 60)
+        if height < 500:
+            height = 500
+        root.geometry(f"{width}x{height}")
+        root.minsize(560, 500)
     except Exception:
         pass
     HelpdeskApp(root)
