@@ -11,6 +11,7 @@ AnyDesk/RustDesk) использует WMI / реестр / файлы и кор
 import datetime
 import os
 import platform
+import re
 import socket
 import subprocess
 
@@ -222,51 +223,93 @@ def _network_info() -> list:
 # --------------------------------------------------------------------------
 # AnyDesk / RustDesk — попытка автоопределения ID (с ручным вводом в GUI)
 # --------------------------------------------------------------------------
-def get_anydesk_id() -> str:
-    """AnyDesk умеет отдавать свой ID через CLI: anydesk.exe --get-id"""
-    for exe in ("anydesk.exe", "anydesk"):
+def _installed_executables(name: str):
+    """Стандартные каталоги установки и PATH, без запуска произвольных файлов."""
+    seen = set()
+    for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
+                 os.environ.get("LOCALAPPDATA")):
+        if root:
+            path = os.path.join(root, name, name + ".exe")
+            if path not in seen and os.path.isfile(path):
+                seen.add(path)
+                yield path
+    yield name + ".exe"
+    if os.name != "nt":
+        yield name.lower()
+
+
+def _cli_id(name: str, numeric: bool = False) -> str:
+    for exe in _installed_executables(name):
         try:
-            out = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
-                                 timeout=5, creationflags=0x08000000 if os.name == "nt" else 0)
-            if out.returncode == 0 and out.stdout.strip():
-                return out.stdout.strip()
-        except Exception:
+            result = subprocess.run([exe, "--get-id"], capture_output=True, text=True,
+                                    timeout=5, creationflags=0x08000000 if os.name == "nt" else 0)
+            value = result.stdout.strip()
+            pattern = r"[0-9 ]+" if numeric else r"[A-Za-z0-9_-]+"
+            if result.returncode == 0 and re.fullmatch(pattern, value) and (not numeric or any(c.isdigit() for c in value)):
+                return value.replace(" ", "") if numeric else value
+        except (OSError, subprocess.SubprocessError, UnicodeError):
             continue
-    # Запасной вариант — реестр
+    return ""
+
+
+def _config_value(paths, key: str) -> str:
+    # Читаем только нужный ключ, не секреты и не другие параметры.
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                for line in f:
+                    match = re.match(r"^\s*" + re.escape(key) + r"\s*=\s*([^#\r\n]*)", line)
+                    if match:
+                        value = match.group(1).strip().strip("\"'").strip()
+                        if value:
+                            return value
+        except OSError:
+            continue
+    return ""
+
+
+def get_anydesk_id() -> str:
+    """AnyDesk: CLI установленной программы, затем конфигурация службы/пользователя."""
+    value = _cli_id("AnyDesk", numeric=True)
+    if value:
+        return value
+    paths = []
+    for root in (os.environ.get("ProgramData"), os.environ.get("APPDATA")):
+        if root:
+            paths.extend(os.path.join(root, "AnyDesk", name) for name in ("service.conf", "system.conf"))
+    value = _config_value(paths, "ad.anynet.id")
+    if re.fullmatch(r"[0-9 ]+", value) and value.strip():
+        return value.replace(" ", "")
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\AnyDesk") as key:
-            for i in range(64):
-                try:
-                    name, value, _ = winreg.EnumValue(key, i)
-                    if name.lower() == "adanywhereid" or (isinstance(value, str) and value.isdigit()):
-                        return value
-                except OSError:
-                    break
-    except Exception:
+            value, _ = winreg.QueryValueEx(key, "ad.anynet.id")
+            value = str(value).strip()
+            if value.isdigit():
+                return value
+    except (ImportError, OSError):
         pass
     return ""
 
 
 def get_rustdesk_id() -> str:
-    """RustDesk хранит ID в конфиге TOML."""
-    candidates = [
-        os.path.join(os.environ.get("ProgramData", ""), "RustDesk", "config", "RustDesk.toml"),
-        os.path.expanduser("~/.config/rustdesk/RustDesk.toml"),
-        os.path.expanduser("~/AppData/Roaming/RustDesk/config/RustDesk.toml"),
-    ]
-    for path in candidates:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("id") and "=" in line:
-                        val = line.split("=", 1)[1].strip().strip('"')
-                        if val:
-                            return val
-        except Exception:
-            continue
-    return ""
+    """RustDesk: конфигурация пользователя или службы, затем CLI."""
+    paths = []
+    for root in (os.environ.get("APPDATA"), os.environ.get("ProgramData")):
+        if root:
+            paths.append(os.path.join(root, "RustDesk", "config", "RustDesk.toml"))
+    windows = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windows:
+        for profile in (os.path.join("System32", "config", "systemprofile"),
+                        os.path.join("SysWOW64", "config", "systemprofile"),
+                        os.path.join("ServiceProfiles", "LocalService")):
+            paths.append(os.path.join(windows, profile, "AppData", "Roaming", "RustDesk", "config", "RustDesk.toml"))
+    paths.extend((os.path.expanduser("~/.config/rustdesk/RustDesk.toml"),
+                  os.path.expanduser("~/AppData/Roaming/RustDesk/config/RustDesk.toml")))
+    value = _config_value(paths, "id")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return value
+    return _cli_id("RustDesk")
 
 
 if __name__ == "__main__":

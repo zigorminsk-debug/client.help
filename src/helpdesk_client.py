@@ -76,8 +76,40 @@ class HelpdeskApp:
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         pad = {"padx": 8, "pady": 4}
-        f = ttk.Frame(self.root)
-        f.pack(fill="both", expand=True, **pad)
+        # Вся форма прокручивается, в том числе на небольшом экране и при
+        # увеличенном масштабе Windows. Горизонтальная полоса нужна для длинных подписей.
+        viewport = ttk.Frame(self.root)
+        viewport.pack(fill="both", expand=True)
+        canvas = tk.Canvas(viewport, highlightthickness=0)
+        vbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        hbar = ttk.Scrollbar(viewport, orient="horizontal", command=canvas.xview)
+        canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
+        vbar.pack(side="right", fill="y")
+        hbar.pack(side="bottom", fill="x")
+        canvas.pack(side="left", fill="both", expand=True)
+        f = ttk.Frame(canvas, padding=8)
+        window = canvas.create_window((0, 0), window=f, anchor="nw")
+
+        def update_scrollregion(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def resize_content(event):
+            canvas.itemconfigure(window, width=max(event.width, f.winfo_reqwidth()))
+            update_scrollregion()
+
+        f.bind("<Configure>", update_scrollregion)
+        canvas.bind("<Configure>", resize_content)
+
+        def scroll_wheel(event):
+            # Text виджеты обрабатывают колесо самостоятельно.
+            widget = event.widget
+            if isinstance(widget, tk.Text):
+                return
+            if str(widget).startswith(str(canvas)):
+                canvas.yview_scroll(-int(event.delta / 120), "units")
+                return "break"
+
+        self.root.bind_all("<MouseWheel>", scroll_wheel, add="+")
 
         ttk.Label(f, text="Заявка в техподдержку CSL",
                   font=("Segoe UI", 14, "bold")).pack(anchor="w")
@@ -159,9 +191,14 @@ class HelpdeskApp:
         ttk.Label(f, textvariable=self.status, foreground="#333").pack(anchor="w")
 
         # --- Сведения о ПК ---
-        self.sys_text = tk.Text(f, height=10, width=80, wrap="word", state="disabled",
-                                bg="#f7f7f7", fg="#222")
-        self.sys_text.pack(fill="x", pady=6)
+        sys_frame = ttk.Frame(f)
+        sys_frame.pack(fill="x", pady=6)
+        sys_scroll = ttk.Scrollbar(sys_frame, orient="vertical")
+        self.sys_text = tk.Text(sys_frame, height=10, width=60, wrap="word", state="disabled",
+                                bg="#f7f7f7", fg="#222", yscrollcommand=sys_scroll.set)
+        sys_scroll.configure(command=self.sys_text.yview)
+        sys_scroll.pack(side="right", fill="y")
+        self.sys_text.pack(side="left", fill="both", expand=True)
 
     # ---------------------------------------------------------- system info
     def _collect_system_info(self):
@@ -403,7 +440,7 @@ class HelpdeskApp:
 def main():
     root = tk.Tk()
     try:
-        root.geometry("640x780")
+        root.geometry(f"{min(640, root.winfo_screenwidth())}x{min(780, root.winfo_screenheight() - 80)}")
     except Exception:
         pass
     HelpdeskApp(root)

@@ -185,5 +185,50 @@ def test_updater_get_latest(release_server):
     assert updater.is_newer(rel["tag_name"], "5") is False
 
 
+def test_anydesk_installed_cli_and_config(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    program = tmp_path / "program"
+    exe = program / "AnyDesk" / "AnyDesk.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    monkeypatch.setenv("ProgramFiles", str(program))
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stdout="123 456 789\n")
+    monkeypatch.setattr(sysinfo.subprocess, "run", run)
+    assert sysinfo.get_anydesk_id() == "123456789"
+    assert calls[0] == [str(exe), "--get-id"]
+    monkeypatch.setattr(sysinfo, "_cli_id", lambda *a, **k: "")
+    config = tmp_path / "data" / "AnyDesk" / "service.conf"
+    config.parent.mkdir(parents=True)
+    config.write_text('other=123\nad.anynet.id=987654321\n', encoding="utf-8")
+    monkeypatch.setenv("ProgramData", str(tmp_path / "data"))
+    assert sysinfo.get_anydesk_id() == "987654321"
+
+
+def test_rustdesk_service_config_and_cli_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "app"))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "data"))
+    monkeypatch.setenv("WINDIR", str(tmp_path / "Windows"))
+    path = tmp_path / "Windows" / "System32" / "config" / "systemprofile" / "AppData" / "Roaming" / "RustDesk" / "config" / "RustDesk.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text('identity = "wrong"\nid = "123456789"\n', encoding="utf-8")
+    monkeypatch.setattr(sysinfo, "_cli_id", lambda *a, **k: "fallback123")
+    assert sysinfo.get_rustdesk_id() == "123456789"
+    path.unlink()
+    assert sysinfo.get_rustdesk_id() == "fallback123"
+
+
+def test_cli_rejects_messages_and_failed_results(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(sysinfo, "_installed_executables", lambda name: ["one", "two", "three"])
+    results = iter([SimpleNamespace(returncode=0, stdout="error: no id"),
+                    SimpleNamespace(returncode=1, stdout="123"),
+                    SimpleNamespace(returncode=0, stdout="456\n")])
+    monkeypatch.setattr(sysinfo.subprocess, "run", lambda *a, **k: next(results))
+    assert sysinfo._cli_id("AnyDesk", numeric=True) == "456"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

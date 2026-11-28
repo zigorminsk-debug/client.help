@@ -4,7 +4,7 @@ name: Build & Release CSL Helpdesk Client
 # а также вручную (workflow_dispatch).
 on:
   push:
-    branches: ["arena/9ba65963-client-help"]
+    branches: ["arena/9ba65963-client-help", "arena/39423898-client-help"]
   workflow_dispatch:
 
 # Нужно право создавать Releases (теги + выпуски).
