@@ -230,5 +230,41 @@ def test_cli_rejects_messages_and_failed_results(monkeypatch):
     assert sysinfo._cli_id("AnyDesk", numeric=True) == "456"
 
 
+def test_phone_normalization():
+    assert cfg.normalize_phone("293371412") == "+375 29 337-14-12"
+    assert cfg.normalize_phone("+1 202 555 0123").startswith("+1")
+    with pytest.raises(ValueError):
+        cfg.normalize_phone("123")
+
+
+def test_bundled_update_repo_and_explicit_disable(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfg, "machine_config_path", lambda: tmp_path / "missing")
+    monkeypatch.setattr(cfg, "_read_registry_config", lambda: {})
+    monkeypatch.setattr(cfg._version, "GITHUB_REPO", "owner/repo")
+    monkeypatch.delenv("CSL_HELPDESK_CONFIG", raising=False)
+    assert cfg.load_machine_config()["update_enabled"] is True
+    monkeypatch.setenv("CSL_HELPDESK_CONFIG", '{"update_enabled": false}')
+    assert cfg.load_machine_config()["github_repo"] == "owner/repo"
+    assert cfg.load_machine_config()["update_enabled"] is False
+
+
+def test_audio_checks_input_channels(monkeypatch):
+    import audio_recorder as audio
+    from types import SimpleNamespace
+    monkeypatch.setattr(audio, "_SD_AVAILABLE", True)
+    monkeypatch.setattr(audio, "sd", SimpleNamespace(query_devices=lambda: [{"max_input_channels": 0}]))
+    assert not audio.is_available()
+    monkeypatch.setattr(audio.sd, "query_devices", lambda: [{"max_input_channels": 1}])
+    assert audio.is_available()
+
+
+def test_screenshot_selection_scaling():
+    import screenshot
+    from PIL import Image
+    image = Image.new("RGB", (200, 100))
+    assert screenshot.crop_selection(image, (75, 40), (25, 10), (100, 50)).size == (100, 60)
+    assert screenshot.crop_selection(image, (2, 2), (2, 10), (100, 50)) is None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

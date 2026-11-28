@@ -41,7 +41,7 @@ class HelpdeskApp:
         self.root.title(f"{APP_TITLE} — v{APP_VERSION}")
         self.root.resizable(True, True)
         try:
-            self.root.iconbitmap(default="")
+            self.root.iconbitmap(default=os.path.join(os.path.dirname(__file__), "app.ico"))
         except Exception:
             pass
 
@@ -124,7 +124,7 @@ class HelpdeskApp:
         self.phone_entry = ttk.Entry(contact, textvariable=self.phone_var, width=30)
         self.phone_entry.grid(row=0, column=1, sticky="w", padx=6, pady=4)
         self.phone_entry.bind("<FocusOut>", lambda e: self._save_phone())
-        ttk.Button(contact, text="Сохранить", command=self._save_phone).grid(row=0, column=2, padx=6)
+        ttk.Button(contact, text="Сохранить", command=lambda: self._save_phone(show_error=True)).grid(row=0, column=2, padx=6)
 
         ttk.Label(contact, text="AnyDesk ID:").grid(row=1, column=0, sticky="w", padx=6, pady=4)
         self.anydesk_var = tk.StringVar(value=self.user_data.get("anydesk") or sysinfo.get_anydesk_id())
@@ -171,8 +171,7 @@ class HelpdeskApp:
         self.voice_clear.grid(row=1, column=2, padx=6, pady=4)
 
         if not audio.is_available():
-            self.voice_btn.configure(state="disabled")
-            self.voice_label.configure(text="микрофон недоступен")
+            self.voice_label.configure(text="проверьте микрофон и разрешения")
 
         # --- Кнопки действий ---
         actions = ttk.Frame(f)
@@ -181,8 +180,6 @@ class HelpdeskApp:
         self.submit_btn.grid(row=0, column=0, padx=6)
         self.update_btn = ttk.Button(actions, text="Проверить обновления",
                                      command=self._manual_check_update)
-        if not self.machine_cfg.get("update_enabled"):
-            self.update_btn.configure(state="disabled")
         self.update_btn.grid(row=0, column=1, padx=6)
         ttk.Button(actions, text="О программе", command=self._about).grid(row=0, column=2, padx=6)
 
@@ -234,28 +231,37 @@ class HelpdeskApp:
                 messagebox.showwarning("Телефон", "Введите номер телефона.")
                 return
             self.phone_var.set(val)
-            self._save_phone()
-            win.destroy()
+            if self._save_phone(show_error=True):
+                win.destroy()
 
         ttk.Button(win, text="OK", command=ok).pack(pady=10)
         entry.bind("<Return>", lambda e: ok())
         self.root.wait_window(win)
 
-    def _save_phone(self):
-        self.user_data["phone"] = self.phone_var.get().strip()
+    def _save_phone(self, show_error=False):
+        try:
+            phone = cfg.normalize_phone(self.phone_var.get())
+        except ValueError:
+            if show_error:
+                messagebox.showwarning("Телефон", "Введите корректный номер. Для номера другой страны укажите код с +.")
+            return False
+        self.phone_var.set(phone)
+        self.user_data["phone"] = phone
         self.user_data["anydesk"] = self.anydesk_var.get().strip()
         self.user_data["rustdesk"] = self.rustdesk_var.get().strip()
         self.user_data["comment"] = self.comment.get("1.0", "end").strip()
         cfg.save_user_data(self.user_data)
+        return True
 
     # ------------------------------------------------------------ screenshot
     def _take_screenshot(self):
-        try:
-            self.screenshot_path = shot.capture()
-            self.shot_label.configure(text=f"готов: {os.path.basename(self.screenshot_path)}",
-                                      foreground="#1a7")
-        except Exception as e:
-            messagebox.showerror("Скриншот", f"Не удалось сделать скриншот:\n{e}")
+        def completed(path):
+            if path:
+                self.screenshot_path = path
+                self.shot_label.configure(text=f"готов: {os.path.basename(path)}", foreground="#1a7")
+
+        shot.select_area(self.root, completed,
+                         lambda e: messagebox.showerror("Скриншот", f"Не удалось сделать скриншот:\n{e}"))
 
     def _clear_screenshot(self):
         self.screenshot_path = None
@@ -266,8 +272,13 @@ class HelpdeskApp:
         if not self.recording:
             fd, path = tempfile.mkstemp(prefix="csl_voice_", suffix=".wav")
             os.close(fd)
-            self.recorder = audio.AudioRecorder()
-            self.recorder.start(path)
+            try:
+                self.recorder = audio.AudioRecorder()
+                self.recorder.start(path)
+            except Exception as e:
+                os.unlink(path)
+                messagebox.showerror("Запись голоса", f"Не удалось начать запись: {e}\nПроверьте подключение микрофона и разрешение Windows на доступ к нему.")
+                return
             self.voice_path = path
             self.recording = True
             self.voice_btn.configure(text="Остановить запись")
@@ -301,6 +312,9 @@ class HelpdeskApp:
         threading.Thread(target=self._check_update_thread, args=(False,), daemon=True).start()
 
     def _manual_check_update(self):
+        if not self.machine_cfg.get("update_enabled"):
+            messagebox.showinfo("Обновления", "Обновления отключены администратором или не указан репозиторий GitHub в настройках.")
+            return
         self.update_btn.configure(state="disabled", text="Проверка...")
         threading.Thread(target=self._check_update_thread, args=(True,), daemon=True).start()
 
@@ -334,8 +348,8 @@ class HelpdeskApp:
                         "Обновления", f"Установлена последняя версия (v{APP_VERSION})."))
         except Exception as e:
             if manual:
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Обновления", f"Не удалось проверить обновление:\n{e}"))
+                self.root.after(0, lambda error=str(e): messagebox.showerror(
+                    "Обновления", f"Не удалось проверить обновление:\n{error}"))
         finally:
             if not self._pending_update:
                 self.root.after(0, lambda: self.update_btn.configure(
@@ -367,7 +381,8 @@ class HelpdeskApp:
 
     # --------------------------------------------------------------- submit
     def _on_submit(self):
-        self._save_phone()
+        if not self._save_phone(show_error=True):
+            return
         selected = [label for label, v in self.fault_vars if v.get()]
         if not selected:
             messagebox.showwarning("Неисправность", "Отметьте хотя бы одну неисправность.")

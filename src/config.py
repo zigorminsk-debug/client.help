@@ -19,6 +19,9 @@ import json
 import os
 from pathlib import Path
 
+import phonenumbers
+import _version
+
 VENDOR = "CSL"
 APP_NAME = "HelpdeskClient"
 APP_TITLE = "CSL — Заявка в техподдержку"
@@ -127,7 +130,7 @@ def load_machine_config() -> dict:
     if isinstance(update_enabled, str):
         update_enabled = update_enabled.strip().lower() in ("1", "true", "yes", "on")
     # Если репозиторий не задан — автообновление недоступно в любом случае
-    github_repo = get("github_repo", "githubrepo", "repo")
+    github_repo = get("github_repo", "githubrepo", "repo") or getattr(_version, "GITHUB_REPO", "")
     if not github_repo:
         update_enabled = False
     elif update_enabled is None:
@@ -168,3 +171,14 @@ def is_configured() -> bool:
     """Достаточно ли настроек для отправки заявки (есть URL и учётка)."""
     cfg = load_machine_config()
     return bool(cfg.get("jira_url") and cfg.get("api_user") and cfg.get("project_key"))
+
+
+def normalize_phone(value: str, region: str = "BY") -> str:
+    """Местные номера трактуем как белорусские; международные — по коду страны."""
+    try:
+        number = phonenumbers.parse(value.strip(), region)
+        if not phonenumbers.is_valid_number(number) or number.extension:
+            raise ValueError("Некорректный номер телефона")
+        return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+    except phonenumbers.NumberParseException as exc:
+        raise ValueError("Некорректный номер телефона") from exc

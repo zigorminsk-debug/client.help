@@ -11,6 +11,8 @@ python -m pip install -r requirements.txt pyinstaller
 
 Write-Host ">>> Сборка EXE (PyInstaller)..."
 pyinstaller --onefile --windowed --name CSLHelpdesk `
+    --icon=src/app.ico --add-data "src/app.ico;." `
+    --collect-all _sounddevice_data `
     --hidden-import=system_info `
     --hidden-import=jira_client `
     --hidden-import=screenshot `

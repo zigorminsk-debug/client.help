@@ -63,6 +63,8 @@ jobs:
       - name: Build EXE (PyInstaller, one-file, windowed)
         run: >
           pyinstaller --onefile --windowed --name CSLHelpdesk
+          --icon=src/app.ico --add-data "src/app.ico;."
+          --collect-all _sounddevice_data
           --hidden-import=system_info --hidden-import=jira_client
           --hidden-import=screenshot --hidden-import=audio_recorder
           --hidden-import=config --hidden-import=updater --hidden-import=_version

@@ -22,7 +22,7 @@ def is_available() -> bool:
     if not _SD_AVAILABLE:
         return False
     try:
-        return len(sd.query_devices()) > 0
+        return any(device.get("max_input_channels", 0) > 0 for device in sd.query_devices())
     except Exception:
         return False
 
@@ -48,15 +48,24 @@ class AudioRecorder:
             return
         self._path = path
         self._queue = queue.Queue()
-        self._stream = sd.InputStream(
-            samplerate=self.rate, channels=self.channels,
-            dtype="int16", callback=self._callback,
-        )
-        self._stream.start()
-        self._wf = wave.open(path, "wb")
-        self._wf.setnchannels(self.channels)
-        self._wf.setsampwidth(2)  # 16-bit
-        self._wf.setframerate(self.rate)
+        if not _SD_AVAILABLE:
+            raise RuntimeError("Библиотека записи звука недоступна")
+        try:
+            self._wf = wave.open(path, "wb")
+            self._wf.setnchannels(self.channels)
+            self._wf.setsampwidth(2)
+            self._wf.setframerate(self.rate)
+            self._stream = sd.RawInputStream(
+                samplerate=self.rate, channels=self.channels,
+                dtype="int16", callback=self._callback,
+            )
+            self._stream.start()
+        except Exception:
+            if self._stream is not None:
+                self._stream.close()
+            if self._wf is not None:
+                self._wf.close()
+            raise
         self.recording = True
         self._thread = threading.Thread(target=self._writer, daemon=True)
         self._thread.start()
